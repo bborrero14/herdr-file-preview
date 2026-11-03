@@ -19,6 +19,8 @@ what the docs leave out, all verified on a real build.
   - Plain text for anything else.
 - **Live reload**, in local and remote spaces.
 - **Hide/show the tree** at any width (top-bar button, key `b`), remembered per mode.
+- **Reading zoom** (70–200 %): prose, fences, code view and diagrams scale together;
+  keys `+`/`=`, `-`, `0`, top-bar buttons A− / % / A+, remembered per mode.
 - **Expanded diagrams**: an expand button on each diagram; fit, zoom `+`/`-`/`0`, two-axis
   scrolling, and a sharper re-render when zoom would upscale.
 - **Two modes:**
@@ -97,7 +99,7 @@ Ignore keys that carry platform, control or alt modifiers.
 **Dev hooks:** `nextCommand()` accepts the same keys as `file-preview.<key>`, plus
 `reload`, `anchor`, `retry-diagrams`, `open:<path>` (relative to the root, or
 absolute), `expand:<n>` (n-th diagram, from 0), `zoom-in`, `zoom-out`, `zoom-fit`,
-`zoom-close`, `copy:<n>` (the n-th code box's copy button, from 0; check with
+`zoom-close`, `text-in`, `text-out`, `text-reset` (reading zoom), `copy:<n>` (the n-th code box's copy button, from 0; check with
 `pbpaste`), and `tree-reset` (forget this mode's stored tree choice). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
 with no keyboard or pointer automation.
 
@@ -301,6 +303,29 @@ with no keyboard or pointer automation.
   `-s 2` keys don't change), and switch `image()` to it only when the render's answer
   says the file exists. Cap at 4. A wheel or trackpad zoom with `on_scroll_wheel`
   is possible but not done.
+
+### Reading zoom
+
+- **One level `z`** from `[0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]`. Only the document
+  scales: top bar, tree, status bar and fence headers keep their size.
+- **Prose:** `.text_size(round(13 × z))` on the Markdown column. `TextView.markdown`
+  inherits it, and its headings, tables and inline code scale with it. Don't use
+  `window().set_rem_size()`: it rescales the whole window.
+- **Code:** `font_size = round(12 × z)`, and every height from the Editor metrics above
+  (`round(f × 1.618)` rows, `f × 0.6` columns, 24 px wrap pad). Measured exact at 80, 100,
+  150 and 200 % (plain and wrapped JSON fences). Scale the fence's vertical padding too,
+  `round(6 × z)`, so the margin around the text stays proportional.
+- **`EditorState` has no font-size setter** (only `set_value`). On a level change, create
+  new states on the existing blocks and release the old ones (in the handler, never in
+  `render`); keep the blocks, so diagrams keep their render and live-reload patching still
+  works. Drop the cached wrapped-row counts.
+- **Diagrams:** width `min(colW, pngW / 2 × z, 600 × z)`, through the same function as the
+  placeholder, so nothing jumps. Above 100 % the `-s 2` PNG is upscaled (slightly soft).
+- **Keys** without modifiers on the tree and preview handlers: `+` or `=` in, `-` out, `0`
+  reset. The expanded diagram has its own focus handle and its own `+ − 0`, so the two
+  never mix.
+- Persist per mode like the tree: `setShared("file-preview.zoom.<popup|panel>", z)` (`null`
+  at 100 %), read once in `init`. The diagram-mode copy ignores it.
 
 ### Live reload
 

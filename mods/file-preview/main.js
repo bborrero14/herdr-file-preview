@@ -14,7 +14,8 @@ import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
 
 const ICON = "mods/file-preview/icons/";
 const ROW = 22;              // tree row height
-const FONT = 12;             // code font size
+const FONT = 12;             // code font size at 100 %
+const PROSE = 13;            // Markdown prose size at 100 %
 // Editor metrics, measured at 12, 13, 14, 16 and 18 px: line height is GPUI's phi rounded, a
 // mono char is 0.6 em, and soft wrap leaves WRAP_PAD px of the fence width without text.
 const lineHeight = (font) => Math.round(font * 1.618034);
@@ -30,6 +31,20 @@ const POLL_FILE = 2500, POLL_TREE = 10000;
 const TREE_W = 260, NARROW = 600;   // below NARROW px the tree folds into a strip
 const STRIP_W = 28, NARROW_TREE_W = 220;
 const TREE_KEY = "file-preview.tree.";   // + "popup" | "panel": the last explicit hide/show, persisted
+// Reading zoom of the document (prose, fences, code view, diagrams); never the bars or the tree.
+const LEVELS = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const ZOOM_KEY = "file-preview.zoom.";   // + "popup" | "panel": the level, persisted (null at 100 %)
+
+/** Reading zoom action of an unmodified key: "in" | "out" | "reset" | null. */
+function textKey(e) {
+  const m = e.modifiers;
+  if (m.platform || m.control || m.alt) return null;
+  const k = e.key, c = e.key_char;
+  if (c === "+" || k === "+" || k === "=") return "in";
+  if (c === "-" || k === "-") return "out";
+  if (k === "0") return "reset";
+  return null;
+}
 
 // Same shape as mods/files: where the focused terminal is, and on which machine.
 function location() {
@@ -101,7 +116,9 @@ export default class FilePreview extends View {
     this.loadedAt = null;   // when the shown content last changed
     this.dark = settings().dark;
     this.colW = null;       // measured width of the Markdown column (for diagram sizes)
-    this.codeFont = FONT;   // font size of every Editor
+    const z = shared(ZOOM_KEY + this.mode);
+    this.textZoom = LEVELS.includes(z) ? z : 1;
+    this.codeFont = Math.round(FONT * this.textZoom);   // font size of every Editor
     this.width = null;      // measured width of the whole view
     // Narrow view without a stored choice: the tree is unfolded. A 45 % panel is ~550 px on a
     // 1512 px window, so it starts open unless a file comes with the props (the popup's Anchor).
@@ -469,6 +486,37 @@ export default class FilePreview extends View {
       ...(language ? { language } : {}), value, line_numbers: false, folding: false, soft_wrap: lang.wraps(language) });
   }
 
+  /** Steps the reading zoom ("in" | "out" | "reset") and keeps it for this mode's next copies. */
+  textAct(a, cx) {
+    const i = LEVELS.indexOf(this.textZoom);
+    const z = a === "reset" ? 1 : LEVELS[Math.max(0, Math.min(LEVELS.length - 1, i + (a === "in" ? 1 : -1)))];
+    if (z === this.textZoom) return;
+    this.textZoom = z;
+    setShared(ZOOM_KEY + this.mode, z === 1 ? null : z);
+    const font = Math.round(FONT * z);
+    if (font !== this.codeFont) { this.codeFont = font; this.refont(); }
+    cx.notify();
+  }
+
+  /** EditorStates take their font size only at creation: new ones in place, blocks and diagrams kept. */
+  refont() {
+    if (this.code) {
+      const language = lang.forPath(this.file);
+      this.code.release();
+      this.code = EditorState.new({ readonly: true, font_family: settings().font_family, font_size: this.codeFont, syntax: syntax(),
+        ...(language ? { language } : {}), soft_wrap: lang.wraps(language), value: this.doc?.text ?? "" });
+    }
+    for (const b of this.blocks) {
+      if (!b.state) continue;
+      b.state.release();
+      b.state = this.fenceState(b.text, b.kind === "mmd" ? null : lang.forFence(b.info));
+      b.vis = null;
+    }
+  }
+
+  /** Prose size of the reading zoom. */
+  proseSize() { return Math.round(PROSE * this.textZoom); }
+
   /** Visual rows of a fence; a soft-wrapped one depends on the measured column width. */
   rows(b) {
     if (!b.wrap || !this.colW) return b.lines;
@@ -517,7 +565,7 @@ export default class FilePreview extends View {
 
   /** Displayed size of a w × h PNG (rendered at -s 2): the same formula for the image and its placeholder. */
   diagramSize(w, h) {
-    const dw = Math.max(1, Math.min(this.colW ?? 812, w / 2, MAX_DIAGRAM_W));
+    const z = this.textZoom, dw = Math.max(1, Math.min(this.colW ?? 812, (w / 2) * z, MAX_DIAGRAM_W * z));
     return { w: dw, h: (dw * h) / w };
   }
 
@@ -564,6 +612,8 @@ export default class FilePreview extends View {
     // Expanded diagram: expand:<n>, then zoom-in, zoom-out, zoom-fit, zoom-close (the + − 0 Esc keys).
     if (c.startsWith("expand:")) { const n = Number(c.slice(7)); if (Number.isInteger(n) && n >= 0) this.expandDiagram(n, cx); return; }
     if (c.startsWith("zoom-")) return this.zoomAct(c.slice(5), cx);
+    // Reading zoom: text-in, text-out, text-reset (the + − 0 keys outside an expanded diagram).
+    if (c === "text-in" || c === "text-out" || c === "text-reset") return this.textAct(c.slice(5), cx);
     // copy:<n>: code box n (document order, from 0), like its Copy button.
     if (c.startsWith("copy:")) {
       const n = Number(c.slice(5)), b = Number.isInteger(n) ? this.codeBoxes()[n] : null;
@@ -616,6 +666,8 @@ export default class FilePreview extends View {
     const m = e.modifiers;
     if (m.platform || m.control || m.alt) return;
     if (e.key === "escape") { if (this.overlay) closeOverlay(this.overlay); return; }
+    const a = textKey(e);
+    if (a) { cx.stop_propagation(); this.textAct(a, cx); return; }
     let used;
     if (where === "tree") used = this.treeKey(e.key, cx);
     else if (e.key === "tab") { this.focusTree(true); used = true; }
@@ -742,6 +794,11 @@ export default class FilePreview extends View {
       .hover((s) => s.bg(t.hover)).on_click(onClick).child(svg(ICON + icon).size(14).text_color(t.muted));
   }
 
+  textButton(id, label, t, onClick) {
+    return h_flex().id(id).h(22).px(5).flex_none().rounded(5).items_center().justify_center().cursor_pointer()
+      .hover((s) => s.bg(t.hover)).on_click(onClick).text_size(12).text_color(t.muted).child(label);
+  }
+
   topBar(t) {
     const on = this.ctx?.on;
     return h_flex().h(28).flex_none().pl(4).pr(10).gap(6).items_center().border_b(1).border_color(t.border).bg(t.chrome)
@@ -749,6 +806,11 @@ export default class FilePreview extends View {
       .child(div().flex_1().min_w(0).truncate().text_size(12).child(tilde(this.tree.root) || "No folder"))
       .when(Boolean(on), (el) => el.child(div().flex_none().px(6).rounded(4).bg(t.raised).text_size(11)
         .text_color(this.tree.offline ? t.ansi3 : t.muted).child(this.tree.offline ? `${on} · offline` : on)))
+      .child(this.textButton("fp-text-out", "A−", t, (_e, cx) => this.textAct("out", cx)))
+      .child(div().id("fp-text-pct").w(40).flex_none().rounded(4).text_center().text_size(11.5).cursor_pointer().hover((s) => s.bg(t.hover))
+        .text_color(this.textZoom === 1 ? t.dim : t.foreground).on_click((_e, cx) => this.textAct("reset", cx))
+        .child(`${Math.round(this.textZoom * 100)}%`))
+      .child(this.textButton("fp-text-in", "A+", t, (_e, cx) => this.textAct("in", cx)))
       .child(this.button("fp-reload", "reload.svg", t, (_e, cx) => this.reload(cx)))
       .when(Boolean(this.overlay), (el) => el.child(this.button("fp-anchor", "anchor.svg", t, () => this.anchor())))
       .child(this.button("fp-close", "close.svg", t, () => this.closeView()));
@@ -806,7 +868,7 @@ export default class FilePreview extends View {
    * the wheel goes on to the document.
    */
   codeBlock(b, i, t) {
-    const id = b.kind === "mmd" ? `${b.id}-src` : `code-${i}`, lh = lineHeight(this.codeFont);
+    const id = b.kind === "mmd" ? `${b.id}-src` : `code-${i}`, lh = lineHeight(this.codeFont), pad = Math.round(CODE_PAD * this.textZoom);
     const text = this.rows(b) * lh, slack = Math.max(text, 3 * lh);
     const copied = Boolean(b.copied);
     return v_flex().id(id).w_full().flex_none().rounded(6).border_1().border_color(t.border).bg(t.background).overflow_hidden()
@@ -816,7 +878,7 @@ export default class FilePreview extends View {
           .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.copyBlock(b, cx))
           .child(svg(ICON + (copied ? "check.svg" : "copy.svg")).size(13).text_color(copied ? t.done : t.muted))
           .when(copied, (el) => el.child(div().text_size(11).text_color(t.done).child("Copied")))))
-      .child(div().w_full().h(text + 2 * CODE_PAD).flex_none().py(CODE_PAD)
+      .child(div().w_full().h(text + 2 * pad).flex_none().py(pad)
         .child(div().w_full().h(text).overflow_hidden()
           .child(div().w_full().h(text + slack).flex_none().child(Editor.new(b.state).size_full()))));
   }
@@ -856,7 +918,7 @@ export default class FilePreview extends View {
     // Pending: never ask image() for a PNG that doesn't exist yet (it would stay blank).
     // A diagram rendered before (sizes.json) reserves its final height; a new one, an estimate.
     const known = b.key ? this.mermaid.size(b.key) : null;
-    return h_flex().id(b.id).w_full().h(known ? this.diagramSize(known.w, known.h).h + 8 : Math.min(240, 40 + b.lines * 12)).flex_none().gap(8).items_center().justify_center()
+    return h_flex().id(b.id).w_full().h(known ? this.diagramSize(known.w, known.h).h + 8 : Math.round(Math.min(240, 40 + b.lines * 12) * this.textZoom)).flex_none().gap(8).items_center().justify_center()
       .rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12).text_color(t.dim)
       .child(div().w(12).flex_none().text_color(t.accent).frames(SPIN, 90).child(SPIN[0]))
       .child("Rendering diagram…");
@@ -865,12 +927,12 @@ export default class FilePreview extends View {
   previewPane(t, narrow) {
     const doc = this.doc;
     let body;
-    if (!this.file) body = this.message(t, "Select a file", "↑ ↓ move · → ← open/close folder · Enter open · Tab tree/preview · b show/hide tree · r reload" + (this.overlay ? " · Esc close" : ""));
+    if (!this.file) body = this.message(t, "Select a file", "↑ ↓ move · → ← open/close folder · Enter open · Tab tree/preview · b show/hide tree · + − 0 zoom · r reload" + (this.overlay ? " · Esc close" : ""));
     else if (!doc) body = this.message(t, "Loading…");
     else if (doc.kind === "markdown")
       body = v_flex().id(`doc:${this.file}`).flex_1().min_h(0).overflow_y_scrollbar()
         .child(h_flex().w_full().justify_center().px(narrow ? 12 : 24).py(narrow ? 12 : 20)
-          .child(v_flex().id("fp-col").w_full().max_w(860).gap(12)
+          .child(v_flex().id("fp-col").w_full().max_w(860).gap(Math.round(12 * this.textZoom)).text_size(this.proseSize())
             .on_size_change((size, cx) => { if (Math.round(size.width) !== this.colW) { this.colW = Math.round(size.width); cx.notify(); } })
             .children(this.blocks.map((b, i) => b.kind === "md"
               ? TextView.markdown(`md-${i}`, b.text).selectable(true).on_link_click((url, cx) => this.link(url, cx))

@@ -31,6 +31,10 @@ as a panel docked to the right of the terminal.
   scrollbars on both axes. Zooming past the cached image's resolution renders a sharper
   copy (at twice the pixels) in the background and swaps it in. In the popup it covers
   the popup; from the panel it opens as a dialog over the window.
+- **Reading zoom** from 70 % to 200 %: one level scales the Markdown prose (headings,
+  tables and inline code too), code fences, the code view and diagrams together; the bars
+  and the tree keep their size. Use `+` / `-` / `0`, or **A−** / **A+** in the top bar
+  (click the percentage to reset). The popup and the panel each remember their level.
 - **Hide the file tree** at any width with the sidebar button at the top left or `b`.
   The popup and the panel each remember the choice.
 - **Code view** with syntax highlighting for JavaScript/TypeScript, Bash/sh/zsh, Python,
@@ -130,6 +134,8 @@ Inside the mod:
 | `Tab` | Switch focus between the tree and the preview |
 | `r` | Reload the tree and the file |
 | `b` | Hide or show the file tree (remembered separately for the popup and the panel) |
+| `+` (or `=`) / `-` | Reading zoom in / out (70 % to 200 %; remembered separately for the popup and the panel) |
+| `0` | Reading zoom back to 100 % |
 | `Esc` | Close the popup |
 
 In an expanded diagram:
@@ -140,7 +146,8 @@ In an expanded diagram:
 | `0` | Back to fit |
 | `Esc` | Close the expanded diagram (the popup stays open) |
 
-The top bar also has buttons for the tree, reload, anchor (popup only: dock as a panel)
+The top bar also has buttons for the tree, reading zoom (A−, the percentage, A+),
+reload, anchor (popup only: dock as a panel)
 and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 
 ## Limitations
@@ -158,6 +165,8 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
   no drag to pan, and zooming doesn't keep the point under the pointer in place.
   The sharper render is capped at `-s 4`, so past 200 % (the percentage shown) the
   image is upscaled a little.
+- Above 100 % reading zoom, diagrams in the document are the cached `-s 2` image scaled
+  up, so they are a little soft; the expanded view renders a sharper copy.
 - Leaving an expanded diagram in the popup puts the document back at its top: Herdr
   can't read or restore a scroll position.
 - macOS and Linux only; remote spaces must be Unix. **Windows is not supported.**
