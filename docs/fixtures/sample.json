@@ -1,0 +1,18 @@
+{
+  "name": "file-preview",
+  "version": "0.3.0",
+  "private": true,
+  "description": "A tree and a rendered preview of the focused terminal's folder",
+  "keywords": ["herdr", "markdown", "mermaid", "preview"],
+  "limits": { "perFolder": 500, "total": 20000, "maxBytes": 1000000, "ratio": 0.45 },
+  "features": {
+    "markdown": true,
+    "mermaid": { "enabled": true, "theme": null, "scale": 2 },
+    "languages": ["js", "bash", "python", "c", "go", "json", "yaml"]
+  },
+  "machines": [
+    { "id": "local", "remote": false, "latencyMs": 0 },
+    { "id": "203.0.113.10", "remote": true, "latencyMs": 12.5 }
+  ],
+  "note": "A long string value that keeps going past the edge of a narrow preview column, so soft wrap has something to fold onto the next visual line without any help."
+}

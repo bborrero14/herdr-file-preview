@@ -1,0 +1,6 @@
+{
+  "global": {
+    "cmd-e": "mod.open:file-preview",
+    "cmd-shift-e": "mod.open:file-preview-panel"
+  }
+}

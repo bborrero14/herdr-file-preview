@@ -1,0 +1,26 @@
+# file-preview settings (sample)
+name: file-preview
+version: 0.3.0
+private: true
+keywords: [herdr, markdown, mermaid]
+limits:
+  per_folder: 500
+  total: 20000
+  max_bytes: 1_000_000
+  ratio: 0.45
+mermaid:
+  enabled: true
+  theme: ~        # null
+  scale: 2
+machines:
+  - id: local
+    remote: false
+  - id: "203.0.113.10"
+    remote: true
+    latency_ms: 12.5
+description: |
+  A tree and a rendered preview
+  of the focused terminal's folder.
+anchors:
+  base: &base { retries: 3, timeout: 2.5 }
+  remote: *base

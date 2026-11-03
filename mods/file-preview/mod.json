@@ -1,0 +1,6 @@
+{
+  "place": "none",
+  "title": "File preview",
+  "focusable": true,
+  "overlay": { "kind": "dialog", "width": 0.95, "height": 0.95 }
+}
