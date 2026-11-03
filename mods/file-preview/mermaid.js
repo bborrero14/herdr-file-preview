@@ -44,6 +44,8 @@ export function fnv1a(s) {
 export const themeOf = (dark) => (dark ? "dark" : "default");
 export const cacheKey = (source, theme) => fnv1a(source + "|" + theme);
 export const imagePath = (key) => REL + key + ".png";
+/** Key of a render at another -s scale; scale 2 keeps the plain key. */
+export const scaledKey = (key, scale) => (scale === 2 ? key : `${key}-s${scale}`);
 
 function pngSize(u8) {
   const be = (o) => ((u8[o] << 24) >>> 0) + (u8[o + 1] << 16) + (u8[o + 2] << 8) + u8[o + 3];
@@ -116,7 +118,7 @@ export class Mermaid {
   /** Retry of a render error: forget it, so the next request renders again. */
   forget(key) { if (this.known.get(key)?.error) this.known.delete(key); }
 
-  /** d = { key, source, theme: "dark" | "default" } */
+  /** d = { key, source, theme: "dark" | "default", scale? } (scale defaults to 2) */
   request(d, waiter, cx) {
     if (this.closed) return;
     const key = d.key;
@@ -162,7 +164,7 @@ export class Mermaid {
     if (tool.error) { answer({ error: tool.error, setup: true }); return null; }
     const base = dir() + job.key, png = base + ".png";
     await fs.writeFile(base + ".mmd", job.source);
-    const args = [...tool.pre, "-i", base + ".mmd", "-o", png, "-t", job.theme, "-b", "transparent", "-s", "2", "-q", "-p", tool.pp];
+    const args = [...tool.pre, "-i", base + ".mmd", "-o", png, "-t", job.theme, "-b", "transparent", "-s", String(job.scale ?? 2), "-q", "-p", tool.pp];
     const proc = exec(tool.cmd, args).then((r) => ({ r }), (e) => ({ e }));
     let timer;
     const late = new Promise((ok) => { timer = cx.timer.after(TIMEOUT, () => ok({ timeout: true })); });

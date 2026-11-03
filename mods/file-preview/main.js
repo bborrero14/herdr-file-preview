@@ -3,13 +3,14 @@
 // It follows the focused terminal (local or remote space) and reloads what it shows when it changes.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { spaces, panes, focused, exec, watchFolder, theme, settings, props, closeOverlay, nextCommand, home, window, run } from "herdr";
+import { spaces, panes, focused, exec, watchFolder, theme, settings, props, closeOverlay, openOverlay, nextCommand, home, window, run, shared, setShared } from "herdr";
 import { Tree, parent, PER_FOLDER, TOTAL } from "./tree.js";
 import { readSource, stamp, LIMIT } from "./source.js";
 import { segment } from "./markdown.js";
 import * as lang from "./lang.js";
 import { Mermaid, fnv1a, cacheKey, themeOf } from "./mermaid.js";
 import { dock, panelOf, size } from "./dock.js";
+import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
 
 const ICON = "mods/file-preview/icons/";
 const ROW = 22;              // tree row height
@@ -23,6 +24,7 @@ const DEBOUNCE = 200, MAX_WAIT = 1000;   // live reload: agents write in bursts
 const POLL_FILE = 2500, POLL_TREE = 10000;
 const TREE_W = 260, NARROW = 600;   // below NARROW px the tree folds into a strip
 const STRIP_W = 28, NARROW_TREE_W = 220;
+const TREE_KEY = "file-preview.tree.";   // + "popup" | "panel": the last explicit hide/show, persisted
 
 // Same shape as mods/files: where the focused terminal is, and on which machine.
 function location() {
@@ -74,13 +76,20 @@ export default class FilePreview extends View {
     const p = props() ?? {};
     this.overlay = p.overlay ?? null;
     this.mode = p.mode ?? "popup";
+    this.zoom = null;       // the expanded diagram (Zoom), if any
+    this.blocks = [];       // [{ kind: "md", text } | { kind: "code", info, lines, state }]
+    this.zoomFocus = cx.focus_handle();
+    // Esc is the app's (it closes the popup's dialog before on_key_down sees it):
+    // a binding of our own, scoped to the expanded diagram's key context, comes first.
+    try { cx.bind_keys([{ keystroke: "escape", action: ZOOM_ESCAPE, context: ZOOM_CONTEXT }]); } catch {}
+    // A panel's expanded diagram: this copy is only that dialog (no tree, context or watchers).
+    if (this.mode === "diagram") return this.initDiagram(p, cx);
     this.treeFocus = cx.focus_handle();
     this.previewFocus = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
     this.cursor = null;     // keyboard row (rel path)
     this.file = null;       // shown file (rel path)
     this.doc = null;        // what readSource returned, plus segments for Markdown
-    this.blocks = [];       // [{ kind: "md", text } | { kind: "code", info, lines, state }]
     this.code = null;       // EditorState of a code/text file
     this.seq = 0;           // bumps on every file load; late results are dropped
     this.stamp = null;      // "<mtime> <size>" of the shown file, when polled
@@ -88,9 +97,11 @@ export default class FilePreview extends View {
     this.dark = settings().dark;
     this.colW = null;       // measured width of the Markdown column (for diagram sizes)
     this.width = null;      // measured width of the whole view
-    // Narrow view: the tree is unfolded. A 45 % panel is ~550 px on a 1512 px window, so it starts
-    // open unless a file comes with the props (the popup's Anchor).
+    // Narrow view without a stored choice: the tree is unfolded. A 45 % panel is ~550 px on a
+    // 1512 px window, so it starts open unless a file comes with the props (the popup's Anchor).
     this.treeOpen = typeof p.file !== "string";
+    const pref = shared(TREE_KEY + this.mode);
+    this.treePref = typeof pref === "boolean" ? pref : null;   // an explicit toggle wins over the defaults
     this.resize = typeof p.resize === "number" ? { anchor: p.anchor ?? null } : null;   // a launcher's 45 %, applied once
     this.mermaid = new Mermaid();
     cx.spawn(async () => { await this.mermaid.prune(); });
@@ -110,9 +121,25 @@ export default class FilePreview extends View {
     cx.timer.every(5000, (cx) => { if (this.file && this.loadedAt) cx.notify(); });
   }
 
+  initDiagram(p, cx) {
+    this.mermaid = new Mermaid();
+    const d = p.diagram;
+    if (d?.path && d.w > 0 && d.h > 0) this.zoom = new Zoom(d, this.mermaid, p.label ?? "Diagram");
+    this.zoomFocus.focus();
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (this.zoom && c.startsWith("zoom-")) this.zoomAct(c.slice(5), cx);
+        cx.notify();
+      }
+    });
+  }
+
   async close() {
     this.closed = true;
-    this.mermaid.close();
+    if (this.zoom) this.zoom.closed = true;
+    this.zoomFocus?.release();
+    this.mermaid?.close();
     this.release();
     this.seq++;
     if (this.ctx) this.stop(this.ctx);
@@ -488,6 +515,36 @@ export default class FilePreview extends View {
     return { w: dw, h: (dw * h) / w };
   }
 
+  /** Diagram n (document order, from 0) expanded: a layer in the popup, a dialog over the window from the panel. */
+  expandDiagram(n, cx) {
+    const list = this.blocks.filter((b) => b.kind === "mmd"), b = list[n];
+    if (!b?.d?.ok) { this.note = b ? `Diagram ${n + 1} is not rendered` : `No diagram ${n + 1}`; cx.notify(); return; }
+    const d = { key: b.key, source: b.text, theme: themeOf(this.dark), path: b.d.path, w: b.d.w, h: b.d.h };
+    const label = `${this.file} · diagram ${n + 1} of ${list.length}`;
+    // A window overlay would draw under this popup's dialog, so the popup draws its own layer.
+    if (this.mode === "panel") openOverlay({ kind: "dialog", width: 0.95, height: 0.95, mod: "file-preview", props: { mode: "diagram", diagram: d, label } });
+    else { this.zoom = new Zoom(d, this.mermaid, label); this.zoomFocus.focus(); }
+    cx.notify();
+  }
+
+  /** "in" | "out" | "fit" | "close" on the expanded diagram. */
+  zoomAct(a, cx) {
+    if (!this.zoom) return;
+    if (a !== "close") return this.zoom.act(a, cx);
+    if (this.mode === "diagram") { if (this.overlay) closeOverlay(this.overlay); return; }
+    this.zoom.closed = true;
+    this.zoom = null;
+    this.previewFocus.focus();
+  }
+
+  zoomKeyDown(e, cx) {
+    const a = zoomKey(e);
+    if (!a) return;
+    cx.stop_propagation();
+    this.zoomAct(a, cx);
+    cx.notify();
+  }
+
   // ---- keyboard --------------------------------------------------------------
 
   command(c, cx) {
@@ -498,6 +555,11 @@ export default class FilePreview extends View {
     if (c.startsWith("open:")) return this.reveal(c.slice(5), cx);
     // Same as each diagram notice's Retry.
     if (c === "retry-diagrams") { const b = this.blocks.find((b) => b.d?.setup) ?? this.blocks.find((b) => b.d?.error); if (b) this.retryDiagram(b, cx); return; }
+    // Expanded diagram: expand:<n>, then zoom-in, zoom-out, zoom-fit, zoom-close (the + − 0 Esc keys).
+    if (c.startsWith("expand:")) { const n = Number(c.slice(7)); if (Number.isInteger(n) && n >= 0) this.expandDiagram(n, cx); return; }
+    if (c.startsWith("zoom-")) return this.zoomAct(c.slice(5), cx);
+    // Forgets the stored tree choice of this mode (back to the defaults).
+    if (c === "tree-reset") { this.treePref = null; setShared(TREE_KEY + this.mode, null); return; }
     this.treeKey(c, cx);
   }
 
@@ -553,18 +615,24 @@ export default class FilePreview extends View {
   // ---- panel ----------------------------------------------------------
 
   narrow() { return this.width !== null && this.width < NARROW; }
-  treeShown() { return !this.narrow() || this.treeOpen; }
+  /** The stored choice of this mode, else: shown when wide; when narrow, as the panel started. */
+  treeShown() { return this.treePref ?? (!this.narrow() || this.treeOpen); }
 
-  /** Tree focus; in a narrow view with the tree folded, the preview (open: unfold it first). */
+  /** Tree focus; with the tree hidden, the preview (open: show it first). */
   focusTree(open = false) {
-    if (!this.treeShown() && open) this.treeOpen = true;
+    if (!this.treeShown() && open) this.setTree(true);
     (this.treeShown() ? this.treeFocus : this.previewFocus).focus();
   }
 
   toggleTree() {
-    if (!this.narrow()) return;          // a wide view always shows the tree
-    this.treeOpen = !this.treeOpen;
-    (this.treeOpen ? this.treeFocus : this.previewFocus).focus();
+    this.setTree(!this.treeShown());
+    (this.treeShown() ? this.treeFocus : this.previewFocus).focus();
+  }
+
+  /** An explicit hide/show: kept for the next popup or panel (per mode), at any width. */
+  setTree(open) {
+    this.treePref = this.treeOpen = open;
+    setShared(TREE_KEY + this.mode, open);
   }
 
   sized(box, cx) {
@@ -623,22 +691,38 @@ export default class FilePreview extends View {
   // ---- UI ----------------------------------------------------------------------
 
   render(cx) {
-    this.follow(cx);
     const t = theme();
+    if (this.mode === "diagram") {
+      if (!this.zoom) return v_flex().size_full().bg(t.surface).child(this.message(t, "Nothing to show", "Esc close"));
+      return this.zoomLayer(t);
+    }
+    this.follow(cx);
     if (settings().dark !== this.dark) {
       // Theme flipped: syntax colors are baked into the EditorStates, so rebuild them (outside render).
       this.dark = settings().dark;
       cx.spawn(async (cx) => { this.build(cx); cx.notify(); });
     }
-    const rows = this.tree.rows(), narrow = this.narrow();
+    const rows = this.tree.rows(), narrow = this.narrow(), shown = this.treeShown();
+    // The expanded diagram replaces the popup's content: nothing under it can take the pointer
+    // (no occlusion API), and the EditorStates stay retained for the way back.
+    if (this.zoom) return v_flex().id("fp-root").size_full().min_h(0).on_size_change((box, cx) => this.sized(box, cx)).child(this.zoomLayer(t));
     return v_flex().id("fp-root").size_full().min_h(0).bg(t.surface).text_color(t.foreground).text_size(13)
-      .on_size_change((size, cx) => this.sized(size, cx))
+      .on_size_change((box, cx) => this.sized(box, cx))
       .child(this.topBar(t))
       .child(h_flex().flex_1().min_h(0)
-        .when(narrow, (el) => el.child(this.strip(t)))
-        .when(this.treeShown(), (el) => el.child(this.treePane(rows, t, narrow ? Math.min(NARROW_TREE_W, Math.round(this.width * 0.55)) : TREE_W)))
+        .when(narrow || !shown, (el) => el.child(this.strip(t)))
+        .when(shown, (el) => el.child(this.treePane(rows, t, narrow ? Math.min(NARROW_TREE_W, Math.round(this.width * 0.55)) : TREE_W)))
         .child(this.previewPane(t, narrow)))
       .child(this.statusBar(t));
+  }
+
+  zoomLayer(t) {
+    return this.zoom.render(t, this.zoomFocus, {
+      button: (id, icon, t, onClick) => this.button(id, icon, t, onClick),
+      onKey: (e, cx) => this.zoomKeyDown(e, cx),
+      onEscape: (cx) => { this.zoomAct("close", cx); cx?.notify(); },
+      onClose: (cx) => { this.zoomAct("close", cx); cx.notify(); },
+    });
   }
 
   button(id, icon, t, onClick) {
@@ -648,8 +732,8 @@ export default class FilePreview extends View {
 
   topBar(t) {
     const on = this.ctx?.on;
-    return h_flex().h(28).flex_none().px(10).gap(8).items_center().border_b(1).border_color(t.border).bg(t.chrome)
-      .child(svg(ICON + "folder.svg").size(14).flex_none().text_color(t.muted))
+    return h_flex().h(28).flex_none().pl(4).pr(10).gap(6).items_center().border_b(1).border_color(t.border).bg(t.chrome)
+      .child(this.button("fp-tree-bar", "sidebar.svg", t, (_e, cx) => { this.toggleTree(); cx.notify(); }))
       .child(div().flex_1().min_w(0).truncate().text_size(12).child(tilde(this.tree.root) || "No folder"))
       .when(Boolean(on), (el) => el.child(div().flex_none().px(6).rounded(4).bg(t.raised).text_size(11)
         .text_color(this.tree.offline ? t.ansi3 : t.muted).child(this.tree.offline ? `${on} · offline` : on)))
@@ -670,10 +754,10 @@ export default class FilePreview extends View {
       .when(r.denied, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("no access")));
   }
 
-  /** Narrow view: the folded tree's strip, with its toggle. */
+  /** The hidden tree's strip (and a narrow view's), with its toggle. */
   strip(t) {
     return v_flex().id("fp-strip").w(STRIP_W).flex_none().h_full().items_center().pt(4).border_r(1).border_color(t.border).bg(t.chrome)
-      .child(this.button("fp-tree-toggle", this.treeOpen ? "folder-open.svg" : "folder.svg", t, (_e, cx) => { this.toggleTree(); cx.notify(); }));
+      .child(this.button("fp-tree-toggle", this.treeShown() ? "folder-open.svg" : "folder.svg", t, (_e, cx) => { this.toggleTree(); cx.notify(); }));
   }
 
   treePane(rows, t, w) {
@@ -715,8 +799,10 @@ export default class FilePreview extends View {
     if (d.ok) {
       // Rendered at -s 2: half the PNG width is crisp; no h / w_full on the image. The box
       // reserves the final height, also while image() decodes the PNG.
-      const s = this.diagramSize(d.w, d.h);
-      return h_flex().id(b.id).w_full().h(s.h + 8).flex_none().justify_center().py(4).child(image(d.path).w(s.w));
+      const s = this.diagramSize(d.w, d.h), n = this.blocks.filter((o) => o.kind === "mmd").indexOf(b);
+      const right = Math.max(0, Math.floor(((this.colW ?? s.w) - s.w) / 2));   // the image's top-right corner
+      return h_flex().id(b.id).w_full().h(s.h + 8).flex_none().justify_center().py(4).relative().child(image(d.path).w(s.w))
+        .child(this.button(`${b.id}-expand`, "expand.svg", t, (_e, cx) => this.expandDiagram(n, cx)).absolute().top(4).right(right).bg(t.raised));
     }
     if (d.error && b.state) {
       return v_flex().id(b.id).w_full().flex_none().gap(6)
@@ -738,7 +824,7 @@ export default class FilePreview extends View {
   previewPane(t, narrow) {
     const doc = this.doc;
     let body;
-    if (!this.file) body = this.message(t, "Select a file", "↑ ↓ move · → ← open/close folder · Enter open · Tab tree/preview · b tree · r reload" + (this.overlay ? " · Esc close" : ""));
+    if (!this.file) body = this.message(t, "Select a file", "↑ ↓ move · → ← open/close folder · Enter open · Tab tree/preview · b show/hide tree · r reload" + (this.overlay ? " · Esc close" : ""));
     else if (!doc) body = this.message(t, "Loading…");
     else if (doc.kind === "markdown")
       body = v_flex().id(`doc:${this.file}`).flex_1().min_h(0).overflow_y_scrollbar()

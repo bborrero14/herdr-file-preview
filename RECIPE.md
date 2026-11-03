@@ -17,6 +17,9 @@ what the docs leave out, all verified on a real build.
     soft-wrapped.
   - Plain text for anything else.
 - **Live reload**, in local and remote spaces.
+- **Hide/show the tree** at any width (top-bar button, key `b`), remembered per mode.
+- **Expanded diagrams**: an expand button on each diagram; fit, zoom `+`/`-`/`0`, two-axis
+  scrolling, and a sharper re-render when zoom would upscale.
 - **Two modes:**
   - **Popup:** `mod.json` overlay `{ "kind": "dialog", "width": 0.95, "height": 0.95 }`
     with `focusable: true`, opened with `cmd-e` → `mod.open:file-preview`.
@@ -45,8 +48,10 @@ mods/file-preview/
   markdown.js   segment(text) → [{md}, {code, lang}, {mermaid}, …] (fence scanner)
   lang.js       extension / fence info → Editor language id, label, wraps(), wrappedRows()
   mermaid.js    mmdc + browser lookup, one-at-a-time render queue, .cache/, IHDR size, sizes.json, prune
+  zoom.js       Zoom: the expanded diagram (fit, zoom steps, viewport, -s 4 swap) and its keys
   dock.js       anchor terminal, pane.split + 45 % sizing, panel toggle
-  icons/*.svg   own icons (folder, folder-open, file, file-md, file-code, chevrons, reload, anchor, close)
+  icons/*.svg   own icons (folder, folder-open, file, file-md, file-code, chevrons, reload, anchor, close,
+                sidebar, expand, zoom-in, zoom-out, fit)
 mods/file-preview-panel/
   mod.json      { place: none, overlay: { kind: popup, width: 1, height: 1, frame: none } }
   main.js       Launcher View: init() { try { toggle() } finally { if (overlay) closeOverlay(overlay) } }
@@ -83,14 +88,15 @@ Tree keys:
 | Enter / Space | Open the file or toggle the folder |
 | Tab | Switch focus between tree and preview |
 | `r` | Reload |
-| `b` | Fold or unfold the tree in a narrow panel |
+| `b` | Hide or show the tree (any width) |
 | Esc | Close the popup |
 
 Ignore keys that carry platform, control or alt modifiers.
 
 **Dev hooks:** `nextCommand()` accepts the same keys as `file-preview.<key>`, plus
-`reload`, `anchor`, `retry-diagrams` and `open:<path>` (relative to the root, or
-absolute). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
+`reload`, `anchor`, `retry-diagrams`, `open:<path>` (relative to the root, or
+absolute), `expand:<n>` (n-th diagram, from 0), `zoom-in`, `zoom-out`, `zoom-fit`,
+`zoom-close`, and `tree-reset` (forget this mode's stored tree choice). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
 with no keyboard or pointer automation.
 
 ## Platform gotchas (all learned the hard way)
@@ -233,6 +239,48 @@ with no keyboard or pointer automation.
   - Initial context, in order: `props.cwd`/`props.on`; the focused terminal; else the
     tab's first terminal.
   - A remote space with no folder uses the remote `$HOME` (`sh -c 'printf %s "$HOME"'`).
+
+### Tree visibility
+
+- `b` and a sidebar button at the left of the top bar hide or show the tree at any width.
+  Hidden, the tree leaves the same 28 px strip (with a folder button) as a narrow panel.
+- **`localStorage` is per mod copy**, and every popup is a new copy, so it forgets. Store
+  the choice with `setShared("file-preview.tree.<popup|panel>", bool)` (persisted in
+  `shared.json`); read it once in `init` so open copies in other tabs don't flip.
+- With nothing stored: shown, except a narrow panel keeps its launch default (shown;
+  folded after the popup's anchor). A stored choice wins at every width.
+
+### Expanded diagrams
+
+- **Popup: draw your own layer, not a new overlay.** A `window` overlay draws *under*
+  dialogs. Render the layer *instead of* the popup's content: gpui-kit has no
+  `occlude()`, so an absolute layer over the document would let presses, hovers and
+  wheel events reach the tree and the document under it. EditorStates stay retained;
+  only the document's scroll position is lost.
+- **Panel: `openOverlay({ kind: "dialog", width: 0.95, height: 0.95, mod: "file-preview", props: { mode: "diagram", diagram, label } })`.**
+  The same mod in a third mode: `init` returns early (no tree, context, watchers or
+  prune) and `render` draws only the viewer. Every visible copy gets `file-preview.*`
+  commands, so each copy ignores the ones that aren't for it.
+- **Esc:** the app handles Esc first and closes the popup's dialog before the layer's
+  `on_key_down` sees it, so `cx.stop_propagation()` is not enough. Bind it yourself, scoped
+  to the layer: `cx.bind_keys([{ keystroke: "escape", action, context }])` once in `init`,
+  then `.key_context(context).on_action(action, (e, cx) => close())` on the focused layer
+  root (the shipped `win98` menu does the same). A deeper binding wins over the app's.
+- **Viewport:** `div().flex_1().min_h(0).relative()` holding the scroll area
+  `div().id(name).size_full().overflow_scroll()` (measured with `on_size_change`) and
+  `Scrollbar.new(name).absolute().inset_0()`. Inside the area, a box of
+  `max(viewport, image + 2 × 24)` per axis that centers `image(path).w(W)` (again no `h()`).
+  Not `overflow_scrollbar()`: there the wheel scrolled only horizontally even though the
+  content measurably overflowed both axes (5339 × 2022 in a 1434 × 870 viewport), so the
+  layout was not the cause. Plain `overflow_scroll()` is GPUI's own both-axis scrolling;
+  the paired `Scrollbar` paints both bars (shown while scrolling, per the theme).
+  Fit = `min(availW, availH × w / h)`; zoom = fit × 1.25ⁿ, clamped to 0.25–8. Show
+  `W / (pngW / 2)` as the percentage.
+- **Sharper render:** when `W × 2` (device scale; no API reports it) exceeds the PNG's
+  pixel width, request the same source at `-s 4` once, under the key `<key>-s4` (so the
+  `-s 2` keys don't change), and switch `image()` to it only when the render's answer
+  says the file exists. Cap at 4. A wheel or trackpad zoom with `on_scroll_wheel`
+  is possible but not done.
 
 ### Live reload
 

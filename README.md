@@ -23,6 +23,13 @@ as a panel docked to the right of the terminal.
 - **Mermaid diagrams**: ` ```mermaid ` fences are rendered to PNG locally with
   mermaid-cli and cached. If mermaid-cli or a browser is missing, you see the diagram
   source with a notice and a Retry button.
+- **Expanded diagrams**: the expand button in a diagram's top-right corner opens it
+  fitted to the whole view, with zoom (`+`, `-`, `0` for fit), the zoom level and
+  scrollbars on both axes. Zooming past the cached image's resolution renders a sharper
+  copy (at twice the pixels) in the background and swaps it in. In the popup it covers
+  the popup; from the panel it opens as a dialog over the window.
+- **Hide the file tree** at any width with the sidebar button at the top left or `b`.
+  The popup and the panel each remember the choice.
 - **Code view** with syntax highlighting for JavaScript/TypeScript, Bash/sh/zsh, Python,
   C, Go, JSON (also jsonc, jsonl, ndjson, json5, geojson) and YAML (also yml, and TOML
   as an approximation). JSON is always soft-wrapped, so minified one-line files are
@@ -119,10 +126,19 @@ Inside the mod:
 | `Enter` / `Space` | Open the file, or toggle the folder |
 | `Tab` | Switch focus between the tree and the preview |
 | `r` | Reload the tree and the file |
-| `b` | Fold or unfold the tree in a narrow panel (under 600 px) |
+| `b` | Hide or show the file tree (remembered separately for the popup and the panel) |
 | `Esc` | Close the popup |
 
-The top bar also has buttons for reload, anchor (popup only: dock as a panel) and close.
+In an expanded diagram:
+
+| Key | Action |
+|---|---|
+| `+` (or `=`) / `-` | Zoom in / out (steps of 1.25×) |
+| `0` | Back to fit |
+| `Esc` | Close the expanded diagram (the popup stays open) |
+
+The top bar also has buttons for the tree, reload, anchor (popup only: dock as a panel)
+and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 
 ## Limitations
 
@@ -130,8 +146,15 @@ The top bar also has buttons for reload, anchor (popup only: dock as a panel) an
   terminal already shares a row with other panes, the panel joins that row and gets a
   smaller share. Herdr has no API that exposes the tab's split tree.
 - **One panel per tab.** Anchoring from the popup replaces the tab's existing panel.
-- At 45 % on a laptop screen the panel is usually under 600 px wide. It then opens with
-  the tree unfolded over the preview, and `b` folds it away.
+- At 45 % on a laptop screen the panel is usually under 600 px wide. Until you hide or
+  show the tree yourself, it then opens with the tree unfolded over the preview (folded
+  after the popup's anchor button), and `b` folds it away.
+- An expanded diagram scrolls with the wheel, the trackpad or its scrollbars; there is
+  no drag to pan, and zooming doesn't keep the point under the pointer in place.
+  The sharper render is capped at `-s 4`, so past 200 % (the percentage shown) the
+  image is upscaled a little.
+- Leaving an expanded diagram in the popup puts the document back at its top: Herdr
+  can't read or restore a scroll position.
 - macOS and Linux only; remote spaces must be Unix. **Windows is not supported.**
 - Mermaid needs Chrome or Chromium on the local machine. Each diagram renders once
   (about 1 s warm, about 5 s cold) and is cached by content and theme.
@@ -157,7 +180,7 @@ The top bar also has buttons for reload, anchor (popup only: dock as a panel) an
 ## Repository layout
 
 ```
-mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, mermaid.js, dock.js, icons/)
+mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, mermaid.js, zoom.js, dock.js, icons/)
 mods/file-preview-panel/   launcher for the right panel (main.js, dock.js copy)
 scripts/sync.sh            install / update into ~/.config/herdr-app/mods/
 scripts/make-big-md.sh     generates docs/fixtures/big.md (> 1 MB, not versioned)
