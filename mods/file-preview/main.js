@@ -13,6 +13,7 @@ import { dock, panelOf, size } from "./dock.js";
 import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
 import * as git from "./git.js";
 import { listFiles, rank, occurrences, headings, section, FIND_CONTEXT, FIND_ESCAPE, FIND_OPEN, TREE_CONTEXT, DOC_CONTEXT } from "./find.js";
+import { rootKey, recall, snapshot, remember, forget } from "./memory.js";
 
 const ICON = "mods/file-preview/icons/";
 const ROW = 22;              // tree row height
@@ -43,6 +44,7 @@ const FULL_MAX = 1000;       // code files up to this many rows get a line gutte
 const GUTTER = 8, RULER = 8;
 const BAR_X = 8;             // a Markdown block's bar sits this far left of the column
 const FILES_EVERY = 5000;    // an open file search re-lists the root at most this often
+const MEMORY_DELAY = 500;    // the popup stores its per-root state this long after the last change
 
 /** Reading zoom action of an unmodified key: "in" | "out" | "reset" | null. */
 function textKey(e) {
@@ -64,6 +66,8 @@ function location() {
 }
 
 const ctxKey = (l) => JSON.stringify([l.cwd ?? null, l.on ?? null]);
+/** Folders above a root-relative path, outermost first ([] for null or a top-level entry). */
+const ancestors = (rel) => (rel ? rel.split("/").slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join("/")) : []);
 
 // The first context: a launcher's props, else the focused terminal, else (focus on a mod
 // pane, e.g. this panel right after its split) a terminal in the same tab.
@@ -160,8 +164,10 @@ export default class FilePreview extends View {
     this.resize = typeof p.resize === "number" ? { anchor: p.anchor ?? null } : null;   // a launcher's 45 %, applied once
     this.mermaid = new Mermaid();
     cx.spawn(async () => { await this.mermaid.prune(); });
+    // Only the popup remembers its file and folders per root; the panel stays put anyway.
+    this.remembers = this.mode === "popup" && Boolean(this.overlay);
     const first = initial(p);
-    this.start(first, ctxKey(first), cx);
+    this.start(first, ctxKey(first), cx, typeof p.file !== "string");
     // Dev/test aid, harmless: props { file } preselects a file (relative to the root, or absolute).
     if (typeof p.file === "string") this.reveal(p.file, cx);
     this.treeFocus.focus();
@@ -191,6 +197,7 @@ export default class FilePreview extends View {
   }
 
   async close() {
+    this.memFlush();
     this.closed = true;
     if (this.zoom) this.zoom.closed = true;
     this.zoomFocus?.release();
@@ -211,12 +218,15 @@ export default class FilePreview extends View {
   // ---- context and tree ----------------------------------------------------
 
   /** Drops the tree and every watcher of the old context. `key` is the raw location key. */
-  start(ctx, key, cx) {
+  start(ctx, key, cx, restore = true) {
     if (this.ctx) this.stop(this.ctx);
     this.ctxKey = key;
     const cwd = ctx.cwd || (ctx.on ? "" : home());
     this.ctx = { cwd, on: ctx.on ?? null, key, tasks: [], dirty: new Set(), all: false };
     this.tree = new Tree(cwd, this.ctx.on);
+    // memory: { key, saved, sig, ready, timer }; nothing is stored before the saved state is back.
+    this.ctx.memory = this.remembers ? { key: null, saved: null, sig: null, ready: false, timer: null, restore } : null;
+    if (cwd) this.recallRoot(this.ctx);
     this.git = null;        // { files, folders } of the root's repo; null outside one
     this.cursor = null;
     if (this.ts) this.closeTreeFind(null, false);
@@ -230,13 +240,14 @@ export default class FilePreview extends View {
     cx.spawn(async (cx) => {
       const r = await exec("sh", ["-c", 'printf %s "$HOME"'], { on: c.on }).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
       if (this.ctx !== c) return;
-      if (r.code === 0 && r.stdout) { tree.root = c.cwd = r.stdout; this.refreshTree(c, null, cx, true); }
+      if (r.code === 0 && r.stdout) { tree.root = c.cwd = r.stdout; this.recallRoot(c); this.refreshTree(c, null, cx, true); }
       else { this.loadingTree = false; tree.offline = `Cannot reach ${c.on}: ${(r.stderr || "no home folder").trim()}`; }
       cx.notify();
     });
   }
 
   stop(ctx) {
+    ctx.memory?.timer?.cancel();
     for (const t of ctx.tasks) t.cancel();
     ctx.tasks = [];
     ctx.flush?.cancel();
@@ -263,8 +274,10 @@ export default class FilePreview extends View {
 
   /** New context; the shown file stays when it is still under the new root on the same machine. */
   retarget(l, key, cx) {
+    this.memFlush();
     const old = this.ctx, abs = this.file && old ? this.tree.abs(this.file) : null;
     this.start(l, key, cx);
+    if (this.ctx.memory?.saved) return;   // the new root's own memory wins
     if (!abs || (old.on ?? null) !== this.ctx.on || !this.ctx.cwd) return;
     const rel = this.tree.rel(abs);
     if (rel) this.reveal(rel, cx, { keep: true });
@@ -287,6 +300,7 @@ export default class FilePreview extends View {
       this.loadingTree = false;
       const rows = tree.rows();
       if (this.cursor === null || !rows.some((r) => r.path === this.cursor)) this.cursor = rows[0]?.path ?? null;
+      if (ctx.memory && !ctx.memory.ready && tree.loaded) this.restoreFile(ctx, cx);
       // Remote: poll even when the first listing failed, so an offline machine recovers by itself.
       if ((tree.loaded || ctx.on) && !ctx.watching) this.watch(ctx, cx);
       this.gitRefresh(ctx, cx);
@@ -301,6 +315,66 @@ export default class FilePreview extends View {
   reload(cx) {
     this.refreshTree(this.ctx, null, cx, true);
     if (this.file) this.show(this.file, cx);
+  }
+
+  // ---- per-root memory (popup) ------------------------------------------------
+
+  /** Puts the root's saved folders (and the saved file's) in the tree before its first listing. */
+  recallRoot(ctx) {
+    const m = ctx.memory;
+    if (!m) return;
+    m.key = rootKey(this.tree.root, ctx.on);
+    m.saved = m.restore ? recall(m.key) : null;
+    if (!m.saved) { m.ready = true; m.sig = this.memSig(); return; }
+    for (const f of m.saved.expanded) this.tree.expanded.add(f);
+    for (const f of ancestors(m.saved.file)) this.tree.expanded.add(f);
+  }
+
+  /** After the listing that loaded the saved folders (gone ones are dropped): the saved file, if it is still there. */
+  restoreFile(ctx, cx) {
+    const m = ctx.memory, file = m.saved?.file, tree = this.tree;
+    m.ready = true;
+    if (file) {
+      const up = parent(file), name = up ? file.slice(up.length + 1) : file;
+      if ((tree.entries.get(up) ?? []).some((e) => e.name === name && !e.dir)) {
+        this.cursor = file;
+        const i = tree.rows().findIndex((r) => r.path === file);
+        if (i >= 0) this.scroll.scroll_to_item(i, "center");
+        this.show(file, cx, { keep: true });
+      } else for (const f of ancestors(file)) if (!m.saved.expanded.includes(f) && tree.expanded.has(f)) tree.collapse(f);
+    }
+    m.sig = this.memSig();
+  }
+
+  memSig() { return JSON.stringify(snapshot(this.file, this.tree.expanded)); }
+
+  /** A change worth remembering: stored MEMORY_DELAY ms after the last one. */
+  memTouch(cx) {
+    const m = this.ctx?.memory;
+    if (!m?.ready || !cx || this.closed) return;
+    m.timer?.cancel();
+    m.timer = cx.timer.after(MEMORY_DELAY, () => { m.timer = null; if (this.ctx?.memory === m) this.memFlush(); });
+  }
+
+  /** Stores the current root's file and folders now, when they differ from what is stored. */
+  memFlush() {
+    const m = this.ctx?.memory;
+    if (!m) return;
+    if (m.timer) { m.timer.cancel(); m.timer = null; }
+    if (!m.ready || !m.key || !this.tree) return;
+    const snap = snapshot(this.file, this.tree.expanded), sig = JSON.stringify(snap);
+    if (sig === m.sig) return;
+    m.sig = sig;
+    remember(m.key, snap);
+  }
+
+  memForget(key) {
+    const m = this.ctx?.memory, k = key ?? m?.key;
+    if (!k) return;
+    if (m?.timer) { m.timer.cancel(); m.timer = null; }
+    // The current root is not written back on close unless something changes afterwards.
+    if (m && k === m.key) m.sig = this.memSig();
+    this.note = forget(k) ? `Forgot ${k}` : `Nothing stored for ${k}`;
   }
 
   // ---- live reload -------------------------------------------------
@@ -450,18 +524,20 @@ export default class FilePreview extends View {
         catch (e) { if (this.ctx === ctx) { tree.expanded.delete(rel); if (e.unreachable) tree.offline = e.message; else this.note = String(e.message ?? e); } }
         cx.notify();
       });
+    this.memTouch(cx);
     cx.notify();
   }
 
   toggle(rel, cx) {
-    if (this.tree.expanded.has(rel)) { this.tree.collapse(rel); cx.notify(); }
+    if (this.tree.expanded.has(rel)) { this.tree.collapse(rel); this.memTouch(cx); cx.notify(); }
     else this.expand(rel, cx);
   }
 
   /** Opens a file by path (relative to the root, or absolute inside it), expanding its folders. */
   reveal(path, cx, opts = {}) {
     const root = this.tree.root;
-    let rel = path.startsWith("/") ? this.tree.rel(path) : path.replace(/^\.\//, "");
+    // Normalized, so "a/../b" never expands (or remembers) a folder named "a/..".
+    const rel = path.startsWith("/") ? this.tree.rel(normalize(path)) : normalize(path).slice(1);
     if (!rel) { this.note = `Outside ${tilde(root)}: ${path}`; cx.notify(); return; }
     const ctx = this.ctx, tree = this.tree;
     cx.spawn(async (cx) => {
@@ -476,6 +552,7 @@ export default class FilePreview extends View {
       const i = tree.rows().findIndex((r) => r.path === rel);
       if (i >= 0) this.scroll.scroll_to_item(i, "center");
       if (!opts.treeOnly) this.show(rel, cx, opts);
+      this.memTouch(cx);
       cx.notify();
     });
   }
@@ -495,8 +572,10 @@ export default class FilePreview extends View {
    */
   show(rel, cx, { quiet = false, keep = false } = {}) {
     const seq = ++this.seq;
-    if (rel !== this.file) { this.release(); this.doc = null; this.stamp = null; this.loadedAt = null; this.marks = null; this.codeMarks = null; if (this.ds) this.closeDocFind(false); }
+    const moved = rel !== this.file;
+    if (moved) { this.release(); this.doc = null; this.stamp = null; this.loadedAt = null; this.marks = null; this.codeMarks = null; if (this.ds) this.closeDocFind(false); }
     this.file = rel;
+    if (moved) this.memTouch(cx);
     if (!quiet) { this.note = null; this.loadingFile = Boolean(rel); }
     if (!rel || !cx) { this.loadingFile = false; return; }
     const ctx = this.ctx, abs = this.tree.abs(rel);
@@ -957,6 +1036,8 @@ export default class FilePreview extends View {
     }
     // Forgets the stored tree choice of this mode (back to the defaults).
     if (c === "tree-reset") { this.treePref = null; setShared(TREE_KEY + this.mode, null); return; }
+    // memory-forget[:<key>]: drops the popup's memory of this root (or of the root key given).
+    if (c === "memory-forget" || c.startsWith("memory-forget:")) { this.memForget(c.slice(14) || null); return; }
     // Search: tree-find:<q>, doc-find:<q>, find:<q> (the pane with the keyboard), find-next,
     // find-prev, find-enter (open the selected result), find-close, find-esc (the Esc action).
     if (c.startsWith("tree-find:")) return this.findCmd("tree", c.slice(10), cx);
@@ -997,7 +1078,7 @@ export default class FilePreview extends View {
       else if (rows[i + 1]?.depth > row.depth) this.moveTo(rows, i + 1);
     } else if (k === "left") {
       if (!row) return false;
-      if (row.dir && this.tree.expanded.has(row.path)) this.tree.collapse(row.path);
+      if (row.dir && this.tree.expanded.has(row.path)) { this.tree.collapse(row.path); this.memTouch(cx); }
       else if (row.depth > 0) this.moveTo(rows, rows.findIndex((r) => r.path === parent(row.path)));
     } else if (k === "enter" || k === "space") {
       if (!row || row.denied) return false;

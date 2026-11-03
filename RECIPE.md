@@ -54,6 +54,7 @@ mods/file-preview/
   lang.js       extension / fence info → Editor language id, label, wraps(), wrappedRows()
   git.js        read-only git: status → tree letters and folder tints; diff -U0 HEAD → changed lines
   find.js       file list (git ls-files or find) + fuzzy ranking; document matches, headings; key contexts
+  memory.js     popup memory per root: { file, expanded } in shared("file-preview.memory"), LRU of 20
   mermaid.js    mmdc + browser lookup, one-at-a-time render queue, .cache/, IHDR size, sizes.json, prune
   zoom.js       Zoom: the expanded diagram (fit, zoom steps, viewport, -s 4 swap) and its keys
   dock.js       anchor terminal, pane.split + 45 % sizing, panel toggle
@@ -105,7 +106,8 @@ Ignore keys that carry platform, control or alt modifiers.
 `reload`, `anchor`, `retry-diagrams`, `open:<path>` (relative to the root, or
 absolute), `expand:<n>` (n-th diagram, from 0), `zoom-in`, `zoom-out`, `zoom-fit`,
 `zoom-close`, `text-in`, `text-out`, `text-reset` (reading zoom), `copy:<n>` (the n-th code box's copy button, from 0; check with
-`pbpaste`), `tree-reset` (forget this mode's stored tree choice), and the search hooks: `tree-find:<q>`,
+`pbpaste`), `tree-reset` (forget this mode's stored tree choice), `memory-forget[:<key>]`
+(drop the popup's memory of this root, or of the given root key), and the search hooks: `tree-find:<q>`,
 `doc-find:<q>`, `find:<q>` (the pane with the keyboard), `find-next`, `find-prev`,
 `find-enter` (open the selected result), `find-close` and `find-esc` (dispatches the Esc
 action down the focus path, as the bound key would). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
@@ -279,6 +281,31 @@ with no keyboard or pointer automation.
   `shared.json`); read it once in `init` so open copies in other tabs don't flip.
 - With nothing stored: shown, except a narrow panel keeps its launch default (shown;
   folded after the popup's anchor). A stored choice wins at every width.
+
+### Popup memory per root
+
+- Popup only (a copy with `props().overlay`); the panel is long-lived and keeps today's
+  behavior. One shared value, `setShared("file-preview.memory", { entries: { [key]: { file,
+  expanded: [...], at } } })`, with `key` = the root (local) or `<machine>:<root>` (remote).
+  Keep the 20 most recent roots by `at`; store at most 200 folders, shallowest first (a
+  cut then keeps every kept folder's parents). An empty state drops its entry.
+- **Restore before the first listing**: put the saved folders and the saved file's parents
+  in `tree.expanded` right after creating the tree, so the root's first `reload()` lists
+  them all, parents first, and drops the ones that are gone. When that listing has loaded
+  the root, open the file only if its parent's entries contain it (`show(…, {keep: true})`),
+  else collapse the parents it added; then set the cursor and
+  `scroll.scroll_to_item(i, "center")`.
+- **Don't store before the restore finished**: `start()` shows nothing first, which would
+  overwrite the memory with an empty state. A `ready` flag gates every write.
+- **Write on change, not on close**: `close()` has a 250 ms budget and may not run (a hot
+  reload re-inits the copy without it). Expand, collapse and opening a file arm a 500 ms
+  `cx.timer.after`; the flush compares a JSON signature with the last write, so renders
+  and repeated calls cost nothing. `close()` and a root change flush at once.
+- `setShared` re-renders every mod: never call it from `render`.
+- Normalize `open:` paths (`a/../b`): otherwise `reveal` expands, and the memory keeps, a
+  folder named `a/..`.
+- The document's scroll position can't be restored: overflow containers can't be
+  scrolled from a script.
 
 ### Expanded diagrams
 

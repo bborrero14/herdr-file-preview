@@ -35,6 +35,14 @@ as a panel docked to the right of the terminal.
   tables and inline code too), code fences, the code view and diagrams together; the bars
   and the tree keep their size. Use `+` / `-` / `0`, or **A−** / **A+** in the top bar
   (click the percentage to reset). The popup and the panel each remember their level.
+- **The popup remembers each folder.** Per root folder (and machine), it keeps the open
+  file and the expanded folders, and brings them back the next time the popup opens on
+  that root, also after a Herdr restart: the folders reopen, the file shows again and the
+  tree's cursor sits on it, scrolled into view. A file or folder that no longer exists is
+  skipped, and a root seen for the first time starts clean. When the root follows the
+  terminal while the popup is open, the old root's state is saved and the new one's
+  restored. The last 20 roots are kept (up to 200 expanded folders each), in the
+  `file-preview.memory` shared value. The panel doesn't use it: it stays open anyway.
 - **Hide the file tree** at any width with the sidebar button at the top left or `b`.
   The popup and the panel each remember the choice.
 - **Code view** with syntax highlighting for JavaScript/TypeScript, Bash/sh/zsh, Python,
@@ -233,6 +241,8 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 - File search lists at most 50,000 files in a git repository and 20,000 elsewhere.
 - Leaving an expanded diagram in the popup puts the document back at its top: Herdr
   can't read or restore a scroll position.
+- **The popup's memory doesn't keep the document's scroll position**, for the same
+  reason: a reopened file starts at its top. Searches aren't remembered either.
 - macOS and Linux only; remote spaces must be Unix. **Windows is not supported.**
 - Mermaid needs Chrome or Chromium on the local machine. Each diagram renders once
   (about 1 s warm, about 5 s cold) and is cached by content and theme.
@@ -268,7 +278,7 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 ## Repository layout
 
 ```
-mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, git.js, find.js, mermaid.js, zoom.js, dock.js, icons/)
+mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, git.js, find.js, memory.js, mermaid.js, zoom.js, dock.js, icons/)
 mods/file-preview-panel/   launcher for the right panel (main.js, dock.js copy)
 scripts/sync.sh            install / update into ~/.config/herdr-app/mods/
 scripts/make-big-md.sh     generates docs/fixtures/big.md (> 1 MB, not versioned)
