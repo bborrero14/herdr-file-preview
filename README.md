@@ -19,7 +19,10 @@ as a panel docked to the right of the terminal.
 - **Markdown**: CommonMark + GFM (tables, task lists, quotes, strikethrough, links).
   Relative links to `.md` files open inside the mod, and external links open in your
   browser (local spaces only). Embedded images show as their alt text.
-- **Highlighted code fences** in Markdown, one read-only editor per fence.
+- **Highlighted code fences** in Markdown, one read-only editor per fence, sized to
+  its text. Each fence has a header with its language and a **copy button** that puts
+  the fence's content on the clipboard ("Copied" confirms it). The wheel over a fence
+  scrolls the document, not the fence.
 - **Mermaid diagrams**: ` ```mermaid ` fences are rendered to PNG locally with
   mermaid-cli and cached. If mermaid-cli or a browser is missing, you see the diagram
   source with a notice and a Retry button.
@@ -149,6 +152,8 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 - At 45 % on a laptop screen the panel is usually under 600 px wide. Until you hide or
   show the tree yourself, it then opens with the tree unfolded over the preview (folded
   after the popup's anchor button), and `b` folds it away.
+- Long lines in a code fence (other than JSON, which wraps) scroll sideways with the
+  trackpad, but the fence shows no horizontal scrollbar.
 - An expanded diagram scrolls with the wheel, the trackpad or its scrollbars; there is
   no drag to pan, and zooming doesn't keep the point under the pointer in place.
   The sharper render is capped at `-s 4`, so past 200 % (the percentage shown) the

@@ -14,11 +14,16 @@ import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
 
 const ICON = "mods/file-preview/icons/";
 const ROW = 22;              // tree row height
-const FONT = 12, LH = 19;    // code font size and its measured line height
-const CH = FONT * 0.6;       // mono char width, for soft-wrapped fence heights
-const WRAP_PAD = 24;         // fence width the Editor leaves without text (calibrated: 860 px → 116 cols)
-const MAX_EDITORS = 300;
-const MAX_DIAGRAM_W = 600;   // diagram display width cap (logical px), besides the column and half the PNG     // fences past this stay in the prose, uncolored
+const FONT = 12;             // code font size
+// Editor metrics, measured at 12, 13, 14, 16 and 18 px: line height is GPUI's phi rounded, a
+// mono char is 0.6 em, and soft wrap leaves WRAP_PAD px of the fence width without text.
+const lineHeight = (font) => Math.round(font * 1.618034);
+const charWidth = (font) => font * 0.6;
+const WRAP_PAD = 24;
+const CODE_PAD = 6;          // space above and below a fence's text
+const COPIED_MS = 1500;
+const MAX_EDITORS = 300;     // fences past this stay in the prose, uncolored
+const MAX_DIAGRAM_W = 600;   // diagram display width cap (logical px), besides the column and half the PNG
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DEBOUNCE = 200, MAX_WAIT = 1000;   // live reload: agents write in bursts
 const POLL_FILE = 2500, POLL_TREE = 10000;
@@ -96,6 +101,7 @@ export default class FilePreview extends View {
     this.loadedAt = null;   // when the shown content last changed
     this.dark = settings().dark;
     this.colW = null;       // measured width of the Markdown column (for diagram sizes)
+    this.codeFont = FONT;   // font size of every Editor
     this.width = null;      // measured width of the whole view
     // Narrow view without a stored choice: the tree is unfolded. A 45 % panel is ~550 px on a
     // 1512 px window, so it starts open unless a file comes with the props (the popup's Anchor).
@@ -444,7 +450,7 @@ export default class FilePreview extends View {
     this.release();
     const doc = this.doc;
     if (!doc) return;
-    const base = { readonly: true, font_family: settings().font_family, font_size: FONT, syntax: syntax() };
+    const base = { readonly: true, font_family: settings().font_family, font_size: this.codeFont, syntax: syntax() };
     if (doc.kind === "text") {
       const language = lang.forPath(this.file);
       this.code = EditorState.new({ ...base, ...(language ? { language } : {}), soft_wrap: lang.wraps(language), value: doc.text });
@@ -459,14 +465,14 @@ export default class FilePreview extends View {
   }
 
   fenceState(value, language) {
-    return EditorState.new({ readonly: true, font_family: settings().font_family, font_size: FONT, syntax: syntax(),
+    return EditorState.new({ readonly: true, font_family: settings().font_family, font_size: this.codeFont, syntax: syntax(),
       ...(language ? { language } : {}), value, line_numbers: false, folding: false, soft_wrap: lang.wraps(language) });
   }
 
   /** Visual rows of a fence; a soft-wrapped one depends on the measured column width. */
   rows(b) {
     if (!b.wrap || !this.colW) return b.lines;
-    const cols = Math.max(1, Math.floor((this.colW - WRAP_PAD) / CH));
+    const cols = Math.max(1, Math.floor((this.colW - WRAP_PAD) / charWidth(this.codeFont)));
     if (b.vis?.cols !== cols) b.vis = { cols, n: lang.wrappedRows(b.text, cols) };   // per width, not per frame
     return b.vis.n;
   }
@@ -558,6 +564,12 @@ export default class FilePreview extends View {
     // Expanded diagram: expand:<n>, then zoom-in, zoom-out, zoom-fit, zoom-close (the + − 0 Esc keys).
     if (c.startsWith("expand:")) { const n = Number(c.slice(7)); if (Number.isInteger(n) && n >= 0) this.expandDiagram(n, cx); return; }
     if (c.startsWith("zoom-")) return this.zoomAct(c.slice(5), cx);
+    // copy:<n>: code box n (document order, from 0), like its Copy button.
+    if (c.startsWith("copy:")) {
+      const n = Number(c.slice(5)), b = Number.isInteger(n) ? this.codeBoxes()[n] : null;
+      if (b) this.copyBlock(b, cx); else { this.note = `No code block ${c.slice(5)}`; cx.notify(); }
+      return;
+    }
     // Forgets the stored tree choice of this mode (back to the defaults).
     if (c === "tree-reset") { this.treePref = null; setShared(TREE_KEY + this.mode, null); return; }
     this.treeKey(c, cx);
@@ -787,11 +799,40 @@ export default class FilePreview extends View {
       .child(div().text_size(14).child(text)).when(Boolean(sub), (el) => el.child(div().text_size(11.5).child(sub)));
   }
 
+  /**
+   * A fence: header (language, Copy) over a readonly Editor. A code Editor always lets its
+   * text scroll past the end by max(half its height, 3 rows), so it is laid out that much
+   * taller than its text inside a box clipped to the text: it never scrolls vertically, and
+   * the wheel goes on to the document.
+   */
   codeBlock(b, i, t) {
-    return v_flex().id(b.kind === "mmd" ? `${b.id}-src` : `code-${i}`).w_full().flex_none().rounded(6).border_1().border_color(t.border).bg(t.background).overflow_hidden()
-      .child(h_flex().h(22).px(10).items_center().border_b(1).border_color(t.border)
-        .child(div().text_size(11).text_color(t.dim).child(b.info || "text")))
-      .child(div().w_full().h(this.rows(b) * LH + 8).child(Editor.new(b.state).size_full()));
+    const id = b.kind === "mmd" ? `${b.id}-src` : `code-${i}`, lh = lineHeight(this.codeFont);
+    const text = this.rows(b) * lh, slack = Math.max(text, 3 * lh);
+    const copied = Boolean(b.copied);
+    return v_flex().id(id).w_full().flex_none().rounded(6).border_1().border_color(t.border).bg(t.background).overflow_hidden()
+      .child(h_flex().h(24).pl(10).pr(3).items_center().border_b(1).border_color(t.border)
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(lang.fenceLabel(b.kind === "mmd" ? "mermaid" : b.info)))
+        .child(h_flex().id(`${id}-copy`).h(20).flex_none().px(5).gap(4).rounded(4).items_center().cursor_pointer()
+          .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.copyBlock(b, cx))
+          .child(svg(ICON + (copied ? "check.svg" : "copy.svg")).size(13).text_color(copied ? t.done : t.muted))
+          .when(copied, (el) => el.child(div().text_size(11).text_color(t.done).child("Copied")))))
+      .child(div().w_full().h(text + 2 * CODE_PAD).flex_none().py(CODE_PAD)
+        .child(div().w_full().h(text).overflow_hidden()
+          .child(div().w_full().h(text + slack).flex_none().child(Editor.new(b.state).size_full()))));
+  }
+
+  /** The fences that show as code boxes, in document order (Mermaid sources only when shown). */
+  codeBoxes() {
+    return this.blocks.filter((b) => b.state && (b.kind === "code" || b.d?.error));
+  }
+
+  /** Copies a fence's text (without the fence lines); the button says "Copied" for a moment. */
+  copyBlock(b, cx) {
+    cx.write_to_clipboard(b.text);
+    const mark = (b.copied ?? 0) + 1;
+    b.copied = mark;
+    cx.timer.after(COPIED_MS, (cx) => { if (b.copied !== mark) return; b.copied = 0; cx.notify(); });
+    cx.notify();
   }
 
   diagramBlock(b, i, t) {

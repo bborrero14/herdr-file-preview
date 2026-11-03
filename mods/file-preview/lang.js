@@ -57,6 +57,20 @@ export function wrappedRows(text, cols) {
   return rows;
 }
 
+// Fence names that are more precise than the language they highlight as.
+const FENCE_NAMES = {
+  ts: "TypeScript", typescript: "TypeScript", tsx: "TSX", jsx: "JSX", sh: "Shell", shell: "Shell", zsh: "Zsh",
+  console: "Console", jsonc: "JSONC", json5: "JSON5", jsonl: "JSON Lines", ndjson: "NDJSON", geojson: "GeoJSON",
+  toml: "TOML", mermaid: "Mermaid", text: "Text", txt: "Text", plain: "Text", plaintext: "Text",
+};
+
+/** A fence's header: "Python", "TypeScript", the info string as written, or "Text". */
+export function fenceLabel(info) {
+  const k = (info ?? "").toLowerCase();
+  if (!k) return "Text";
+  return FENCE_NAMES[k] ?? NAMES[ALIAS[k]] ?? info;
+}
+
 /** For people: "Markdown", "Python", "Plain text". */
 export function label(path) {
   if (isMarkdown(path)) return "Markdown";

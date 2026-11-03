@@ -12,7 +12,8 @@ what the docs leave out, all verified on a real build.
 - A **lazy file tree** of the focused terminal's `cwd`, which follows the focused
   terminal.
 - A **preview pane** for the selected file:
-  - Markdown: GFM prose, highlighted code fences and Mermaid diagrams as images.
+  - Markdown: GFM prose, highlighted code fences (each with its language and a copy
+    button) and Mermaid diagrams as images.
   - Highlighted source for JS/TS, Bash, Python, C, Go, JSON and YAML. JSON is always
     soft-wrapped.
   - Plain text for anything else.
@@ -96,7 +97,8 @@ Ignore keys that carry platform, control or alt modifiers.
 **Dev hooks:** `nextCommand()` accepts the same keys as `file-preview.<key>`, plus
 `reload`, `anchor`, `retry-diagrams`, `open:<path>` (relative to the root, or
 absolute), `expand:<n>` (n-th diagram, from 0), `zoom-in`, `zoom-out`, `zoom-fit`,
-`zoom-close`, and `tree-reset` (forget this mode's stored tree choice). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
+`zoom-close`, `copy:<n>` (the n-th code box's copy button, from 0; check with
+`pbpaste`), and `tree-reset` (forget this mode's stored tree choice). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
 with no keyboard or pointer automation.
 
 ## Platform gotchas (all learned the hard way)
@@ -108,8 +110,25 @@ with no keyboard or pointer automation.
   - Prose segments go to `TextView.markdown(id, text)`, with stable ids `md-<i>`.
   - Each fence becomes a **read-only `Editor`** with `line_numbers: false`,
     `folding: false`, `font_size: 12`.
-  - Give each fence editor an explicit height of **`rows × 19 + 8` px**. Without one,
-    the Editor collapses to about 2 lines; it has no minimum height.
+  - **Editor metrics** (measured at 12, 13, 14, 16 and 18 px): line height is
+    `round(font × 1.618)` (GPUI's phi: 19, 21, 23, 26, 29), a mono char is
+    `font × 0.6` wide, and text starts flush with the Editor's top edge (no padding).
+    Derive every height from the font size; don't hard-code 19.
+  - **A code Editor always scrolls past its end** by `max(height / 2, 3 rows)`. There is
+    no option to turn it off, so a box sized to the text still scrolls on the wheel
+    until it shows nothing. Fix: a box of exactly `rows × lineHeight` with
+    `overflow_hidden()`, holding the Editor at `text + max(text, 3 × lineHeight)`.
+    At that height its max scroll is 0, so it never moves vertically, doesn't take the
+    wheel, and the document scrolls instead. Selection and copy still work (nothing
+    sits on top). Put the padding outside the clipped box (`py(6)`). The cost is that
+    the Editor's horizontal scrollbar lands in the clipped part. Don't size the box as
+    `rows × 19 + 8`: the 8 px end up as a blank band under the last line.
+  - Without an explicit height the Editor collapses to about 2 lines; it has no
+    minimum height.
+  - **Copy button:** a header row with the normalized language name and a copy button.
+    `cx.write_to_clipboard(text)` with the fence body only (no fence lines, no
+    trailing newline), then "Copied" with a check icon for 1.5 s via one
+    `cx.timer.after`. Keep a counter on the block so a second click restarts the 1.5 s.
   - Create `EditorState`s in `init`, handlers or `cx.spawn`, never in `render`.
     `release()` them when the file or theme changes, and in `close()`.
   - Cap the number of editors (about 300). Fences past the cap stay plain prose.
@@ -138,8 +157,9 @@ with no keyboard or pointer automation.
   `soft_wrap: true`. A fence's height must then count **visual rows**:
   - The Editor breaks a row **before `{` or `[`, or after a space**. With no such
     point, it breaks mid-token. Skip the leading spaces of each continuation.
-  - Columns: `cols = floor((colW − 24) / (12 × 0.6))`. The character width is 7.2 px,
-    and the Editor leaves about 20 px without text; 24 px is the safe pad.
+  - Columns: `cols = floor((colW − 24) / (font × 0.6))`. The Editor leaves about
+    20 px without text; 24 px is the safe pad (checked at 12, 14 and 16 px). Err toward
+    one row too many: the clipped box would hide a row that was not counted.
   - Measure `colW` with `on_size_change` on the preview column, which has a max width
     of 860 px.
   - When the width changes, recompute only the height (cache it per `cols`). Don't
