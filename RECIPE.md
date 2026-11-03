@@ -18,6 +18,9 @@ what the docs leave out, all verified on a real build.
     soft-wrapped.
   - Plain text for anything else.
 - **Live reload**, in local and remote spaces.
+- **Commit history** in a Files | Commits sidebar tab: a GitLab-style graph (lanes,
+  merge/fork curves, nodes, ref flags at the node), a commit view (header, files, tinted diff) and
+  files as of a commit through the normal preview.
 - **Git change marks** (VS Code style): status letters and colors in the tree, changed
   blocks in Markdown, a line gutter (or an overview ruler) in the code view.
 - **Hide/show the tree** at any width (top-bar button, key `b`), remembered per mode.
@@ -53,6 +56,9 @@ mods/file-preview/
   markdown.js   segment(text) → [{md}, {code, lang}, {mermaid}, …] (fence scanner)
   lang.js       extension / fence info → Editor language id, label, wraps(), wrappedRows()
   git.js        read-only git: status → tree letters and folder tints; diff -U0 HEAD → changed lines
+  commits.js    read-only history: paged git log, refs checksum, lane assignment (Graph), git show of one
+                commit (name-status, numstat, patch, caps), a file at a revision, date formats
+  graph.js      one graph cell per commit row: PathBuilder strokes per lane color, the node, the ref-flag pointer (pure)
   find.js       file list (git ls-files or find) + fuzzy ranking; document matches, headings; key contexts
   memory.js     popup memory per root: { file, expanded } in shared("file-preview.memory"), LRU of 20
   mermaid.js    mmdc + browser lookup, one-at-a-time render queue, .cache/, IHDR size, sizes.json, prune
@@ -110,7 +116,10 @@ absolute), `expand:<n>` (n-th diagram, from 0), `zoom-in`, `zoom-out`, `zoom-fit
 (drop the popup's memory of this root, or of the given root key), and the search hooks: `tree-find:<q>`,
 `doc-find:<q>`, `find:<q>` (the pane with the keyboard), `find-next`, `find-prev`,
 `find-enter` (open the selected result), `find-close` and `find-esc` (dispatches the Esc
-action down the focus path, as the bound key would). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
+action down the focus path, as the bound key would), and the history hooks: `tab:files`,
+`tab:commits`, `commits-scope`, `commits-more`, `commit:<row | hash prefix>`,
+`commit-file:<n>`, `commit-back`, `commit-close` and `copy-hash`. Key names (`down`,
+`enter`, …) go to the commit list while the Commits tab shows. These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
 with no keyboard or pointer automation.
 
 ## Platform gotchas (all learned the hard way)
@@ -422,6 +431,101 @@ with no keyboard or pointer automation.
   of the Editor with markers at `top: (line − 1) / rows %` and `h: n / rows %`, `min_h(2)`.
   Markers in the lower half hang from `bottom(%)`, so the 2 px minimum never overflows
   the strip (a marker at the last row was invisible with `top`).
+
+### Commit history
+
+- **Tabs:** `Files | Commits` over the sidebar, only while the git status says the root is
+  in a repo (`this.git` non-null). The choice lives in `shared("file-preview.sidebar.<mode>")`
+  ("commits" or null); the effective tab is `side === "commits" && git ? "commits" : "files"`,
+  so a non-repo root shows Files without losing the preference. The commit list has its
+  own focus handle; when the tab comes or goes with the repo, move the keyboard with it
+  (in the git refresh handler, not in `render`). Wide view: the sidebar grows to
+  `min(460, 40 %)` on the Commits tab; narrow view: the usual 220 px.
+- **Log:** one `sh -c` (same read-only flags as the status) printing a refs checksum,
+  `\1` HEAD `\1` remotes `\1`, then `git log <refs> --topo-order -z
+  --format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s --skip=N -n 301`. Refs: `--branches
+  --tags --remotes HEAD`, **not `--all`** (that drags in `refs/stash`); "current branch" is
+  `HEAD`. Ask for one more than the page to know whether there is more. Exit 6 (no
+  `rev-parse --verify HEAD`) → "No commits yet". `%D`: `HEAD -> x` is the current branch,
+  `tag: x` a tag, `<remote>/x` a remote (from `git remote`), `*/HEAD` dropped.
+- **Paging:** `--skip` continues the same topological order, so lanes carry over between
+  pages. If the checksum changed between pages, reload in full instead. A refresh loads
+  `max(300, loaded)` in one call and rebuilds the lanes; the selection is kept by hash.
+- **Refresh:** the checksum is `{ rev-parse -q --verify HEAD; symbolic-ref -q HEAD;
+  for-each-ref --format=%(objectname)%(refname) refs/heads refs/tags refs/remotes; } | cksum`.
+  Run it after each git status (watch batches that only touch `.git`, tree refreshes,
+  the 5 s poll) while the Commits tab shows, and on switching to it; reload only when it
+  differs. Single-flight like the status. `.git/index` keeps its mtime.
+- **Lanes** (`Graph.add`, one commit at a time): `lanes[i]` = hash lane i waits for.
+  The commit takes the lane waiting for it, else the first free one (a branch tip: no
+  line from above). Every other lane waiting for it ends in its node (a curve from the
+  top) and frees. Lanes waiting for something else pass straight through. The first
+  parent continues the commit's lane (line node → bottom); each other parent takes the
+  lane already waiting for it, or a free one with a new color (curve node → bottom).
+  Trim trailing free lanes. Segments are `[fromLane, fromY, toLane, toY, color]` with
+  y 0 / 1 / 2 = top / node / bottom, so a row is drawn from its own data alone. A new
+  lane's color skips colors of lanes in use when it can (6 colors). Graph width = widest
+  row so far.
+- **Drawing:** inside the virtual list's renderer (painting is allowed there; only
+  handlers are not). Per row, one `PathBuilder.stroke(1.5)` per color holding all its
+  segments (`move_to` + `line_to`, or `cubic_bezier_to` with control points at the
+  half-height of each end for curves), drawn with `window.paint_path(path, color)
+  .absolute().top(0).left(0).size_full()` inside a `relative()` box of the cell's size;
+  coordinates are local pixels. Node: filled circle (two `arc_to`s); merge: a ring (a
+  filled circle with a smaller one in the row's background); HEAD: filled plus a 1.5 px
+  stroked ring in the foreground color. Lanes ≥ 10 (6 in a narrow sidebar) are skipped.
+  Rows: `v_virtual_list(id, n, 24, …)` + `on_item_click` + `track_scroll`; the keyboard
+  uses `scroll_to_item`. Near the end, the renderer starts the next page with
+  `cx.spawn` (allowed there; `cx.notify()` isn't), guarded by a flag.
+- **Ref flags (GitLab style):** drawn at the node, not after the subject. A row with refs
+  wraps the cell in a `relative()` h_flex with `min_w(graph width)`: the cell goes
+  `absolute()` behind, a spacer of `reach(row) * lw + 1` px (`reach` = 1 + the rightmost
+  lane the row draws, capped) puts the flags right after the row's own lanes, so no lane
+  crosses them; flags wider than the graph push that row's subject right (text width is
+  not measurable, so this is the only way to keep them clear). The cell draws a 1 px line
+  from the node to the flag (`flag` option); the first flag has a 5 x 16 filled triangle
+  (`PathBuilder.fill()` with `move_to`/`line_to`/`close`) pointing at the node and
+  `rounded_r` on its body. Colors: the node's lane color; branch filled with `t.chrome`
+  text, tag outlined with a `26` tint, remote a `4d` tint, detached `HEAD` in
+  `t.foreground`, current branch bold with a foreground border. `hist.flags()` folds a
+  remote branch into the local one of the same name on the same commit (`also`), drawn
+  `main ⇄ origin` (`main ⇄` when narrow); the remote name comes from `git remote`
+  (longest matching prefix), not from the first `/`. Every flag is drawn (no cap), each
+  max 140 px (80 narrow) with ellipsis; full names stay in the commit view header pills.
+  `hist.flags()` also sorts them once per commit (not per render): detached `HEAD` / the
+  checked-out branch; `main`, `master`, `develop` (local, then remote-only); other local
+  branches, other remote branches (natural order, case-insensitive); tags descending in
+  natural order (digit runs compare as numbers, so `v1.10` before `v1.9`; git's `%D`
+  gives no creation order). Overflow: the flags box is `flex_shrink_1().min_w(graph
+  width).overflow_hidden()` and the subject is `flex_1().min_w(0)` (basis 0), so when
+  the flags exceed the row the box shrinks first and clips them at its right edge (before
+  the fixed author/date columns when they show), and the subject gets 0 px. One line,
+  no wrap; rows stay 24 px.
+- **Cost:** 1,000 commits loaded, 120 Hz idle baseline 8.1 ms per frame: commit list
+  8.3 ms; with a 2,900-line commit view open 8.4 ms. A spike measured 300 rows with paths
+  at 4–8 ms and the same rows without paths at ~4 ms.
+- **Commit view:** one exec: `git show -s --format=…%B`, `\1`, then three `git show
+  --format= --diff-merges=first-parent -M --no-color --no-ext-diff --no-textconv` runs:
+  `--name-status -z`, `--numstat -z` and `--patch | head -c 2000000`. The three lists come
+  in the same order, so pair them by index (numstat -z: a rename is `a\td\t` followed by
+  two NUL-separated paths). The patch is split at `diff --git`; lines before the first
+  `@@` are headers (`Binary files … differ` marks binary). Caps: 1,000 lines per file,
+  3,000 per commit.
+- **Diff rendering:** `language: "diff"` does **not** highlight (verified), and per-line divs
+  cost 43 ms per frame at 3,000 lines. So: one readonly Editor per file (no language, no
+  line numbers) at its full text height with the fence trick (clipped box, Editor laid
+  out `text + max(text, 3 rows)` tall), plus one absolute tint per **run** of added,
+  deleted or hunk-header lines (`ansi2` / `ansi1` with alpha `26`, `ansi4` with `1a`) and
+  a 3 px bar for added/deleted runs. EditorStates are made when the commit loads, released
+  when it closes, and re-made on a zoom change.
+- **File as of a commit:** `git cat-file -e <sha>:<path>` then `git show <sha>:<path> |
+  head -c LIMIT+1`, classified like a normal read. The path is from the repo's top (that
+  is what `<rev>:<path>` means). A deleted file reads `<sha>^:<path>`. It goes through
+  the normal `show()` with a `read` function and a virtual `this.file` (`<short>:<path>`):
+  extension-based language and Markdown still work, git marks and stat polling skip it,
+  and the popup's memory stores the tree's file (`atCommit.kept`), not the virtual one.
+  Back re-reads the kept file quietly behind the commit view. A user-picked file
+  (`show()` without `quiet`/`read`) closes the commit view.
 
 ### Search
 

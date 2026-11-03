@@ -14,6 +14,8 @@ import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
 import * as git from "./git.js";
 import { listFiles, rank, occurrences, headings, section, FIND_CONTEXT, FIND_ESCAPE, FIND_OPEN, TREE_CONTEXT, DOC_CONTEXT } from "./find.js";
 import { rootKey, recall, snapshot, remember, forget } from "./memory.js";
+import * as hist from "./commits.js";
+import { cell, reach, pointer, palette } from "./graph.js";
 
 const ICON = "mods/file-preview/icons/";
 const ROW = 22;              // tree row height
@@ -45,6 +47,13 @@ const GUTTER = 8, RULER = 8;
 const BAR_X = 8;             // a Markdown block's bar sits this far left of the column
 const FILES_EVERY = 5000;    // an open file search re-lists the root at most this often
 const MEMORY_DELAY = 500;    // the popup stores its per-root state this long after the last change
+// Commit history in the sidebar.
+const SIDE_KEY = "file-preview.sidebar.";   // + "popup" | "panel": "commits", or null for files
+const CROW = 24;             // commit row height
+const LANE_W = 14, NARROW_LANE_W = 10, MAX_LANES = 10, NARROW_MAX_LANES = 6;
+const COMMITS_W = 460;       // the sidebar's width on the Commits tab, when the view is wide
+const META_W = 360;          // author and date show from this sidebar width
+const statusColor = (s, t) => (s === "A" ? t.ansi2 : s === "D" ? t.ansi1 : s === "R" || s === "C" ? t.ansi4 : t.ansi3);
 
 /** Reading zoom action of an unmodified key: "in" | "out" | "reset" | null. */
 function textKey(e) {
@@ -138,7 +147,13 @@ export default class FilePreview extends View {
     if (this.mode === "diagram") return this.initDiagram(p, cx);
     this.treeFocus = cx.focus_handle();
     this.previewFocus = cx.focus_handle();
+    this.commitsFocus = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
+    this.commitScroll = VirtualListScrollHandle.new();
+    this.side = shared(SIDE_KEY + this.mode) === "commits" ? "commits" : "files";   // the sidebar tab chosen
+    this.scope = "all";     // history of every ref ("all") or of HEAD ("head")
+    this.commit = null;     // the commit shown: { hash, data, loading, error }
+    this.atCommit = null;   // a file shown as of a commit: { hash, short, subject, path, kept }
     this.findScroll = VirtualListScrollHandle.new();
     this.ts = null;         // file search of the tree: { input, query, results, total, at, ... }
     this.ds = null;         // search in the shown document: { input, query, hits, total, at, heads }
@@ -211,8 +226,11 @@ export default class FilePreview extends View {
     this.ts?.input.release();
     this.ds?.input.release();
     this.ts = this.ds = null;
+    this.closeCommitView();
+    this.commitScroll?.release();
     this.treeFocus?.release();
     this.previewFocus?.release();
+    this.commitsFocus?.release();
   }
 
   // ---- context and tree ----------------------------------------------------
@@ -275,7 +293,7 @@ export default class FilePreview extends View {
   /** New context; the shown file stays when it is still under the new root on the same machine. */
   retarget(l, key, cx) {
     this.memFlush();
-    const old = this.ctx, abs = this.file && old ? this.tree.abs(this.file) : null;
+    const old = this.ctx, file = this.memFile(), abs = file && old ? this.tree.abs(file) : null;
     this.start(l, key, cx);
     if (this.ctx.memory?.saved) return;   // the new root's own memory wins
     if (!abs || (old.on ?? null) !== this.ctx.on || !this.ctx.cwd) return;
@@ -314,6 +332,8 @@ export default class FilePreview extends View {
 
   reload(cx) {
     this.refreshTree(this.ctx, null, cx, true);
+    if (this.ctx?.log) this.loadLog(this.ctx, cx);
+    if (this.commit || this.atCommit) return;   // a commit never changes
     if (this.file) this.show(this.file, cx);
   }
 
@@ -346,7 +366,10 @@ export default class FilePreview extends View {
     m.sig = this.memSig();
   }
 
-  memSig() { return JSON.stringify(snapshot(this.file, this.tree.expanded)); }
+  memSig() { return JSON.stringify(snapshot(this.memFile(), this.tree.expanded)); }
+
+  /** The shown file of the tree (a file shown as of a commit doesn't count). */
+  memFile() { return this.atCommit ? this.atCommit.kept : this.file; }
 
   /** A change worth remembering: stored MEMORY_DELAY ms after the last one. */
   memTouch(cx) {
@@ -362,7 +385,7 @@ export default class FilePreview extends View {
     if (!m) return;
     if (m.timer) { m.timer.cancel(); m.timer = null; }
     if (!m.ready || !m.key || !this.tree) return;
-    const snap = snapshot(this.file, this.tree.expanded), sig = JSON.stringify(snap);
+    const snap = snapshot(this.memFile(), this.tree.expanded), sig = JSON.stringify(snap);
     if (sig === m.sig) return;
     m.sig = sig;
     remember(m.key, snap);
@@ -450,10 +473,14 @@ export default class FilePreview extends View {
       if (this.ctx !== ctx) return;
       if (s !== undefined && !git.same(this.git, s)) {
         const file = this.file, before = file ? this.git?.files.get(file) : undefined;
+        const side = this.sideNow(), had = this.treeFocus.is_focused() || this.commitsFocus.is_focused();
         this.git = s;
+        // In or out of a repo: the Commits tab comes or goes, and the keyboard follows the sidebar.
+        if (side !== this.sideNow() && had) this.sideFocus().focus();
         if (file && s?.files.get(file) !== before) this.refreshMarks(cx);
         cx.notify();
       }
+      if (this.sideNow() === "commits" && ctx.log) this.logCheck(ctx, cx);
       if (ctx.gitAgain) { ctx.gitAgain = false; this.gitRefresh(ctx, cx); }
     });
   }
@@ -503,7 +530,7 @@ export default class FilePreview extends View {
   /** Remote (or polled) file: re-read only when its mtime or size moves. */
   async statFile(ctx, cx) {
     const rel = this.file;
-    if (this.ctx !== ctx || !rel || ctx.statting) return;
+    if (this.ctx !== ctx || !rel || ctx.statting || this.atCommit) return;
     ctx.statting = true;
     let s;
     try { s = await stamp(this.tree.abs(rel), ctx.on); }
@@ -570,7 +597,9 @@ export default class FilePreview extends View {
    * Shows a file. quiet: a live reload (no spinner; nothing is rebuilt when the content is the
    * same). keep: after a context change, clear the preview if the file isn't there.
    */
-  show(rel, cx, { quiet = false, keep = false } = {}) {
+  show(rel, cx, { quiet = false, keep = false, read = null } = {}) {
+    // A file picked by the user leaves the commit view; read() loads a file as of a commit.
+    if (!quiet && !read) { this.closeCommitView(); this.atCommit = null; }
     const seq = ++this.seq;
     const moved = rel !== this.file;
     if (moved) { this.release(); this.doc = null; this.stamp = null; this.loadedAt = null; this.marks = null; this.codeMarks = null; if (this.ds) this.closeDocFind(false); }
@@ -581,7 +610,7 @@ export default class FilePreview extends View {
     const ctx = this.ctx, abs = this.tree.abs(rel);
     cx.spawn(async (cx) => {
       let doc;
-      try { doc = await readSource(abs, ctx.on); }
+      try { doc = read ? await read() : await readSource(abs, ctx.on); }
       catch (e) { doc = { kind: "error", message: String(e.message ?? e) }; }
       if (this.seq !== seq || this.ctx !== ctx) return;
       this.loadingFile = false;
@@ -691,6 +720,7 @@ export default class FilePreview extends View {
 
   /** EditorStates take their font size only at creation: new ones in place, blocks and diagrams kept. */
   refont() {
+    for (const f of this.commit?.data?.files ?? []) if (f.state) { f.state.release(); f.state = this.diffState(f); }
     if (this.code) {
       const language = lang.forPath(this.file);
       this.code.release();
@@ -896,7 +926,7 @@ export default class FilePreview extends View {
   /** Search in the shown document: marks the blocks (or lines) with matches; it can't scroll to them. */
   openDocFind(cx) {
     const doc = this.doc;
-    if (!this.file || !doc || (doc.kind !== "markdown" && doc.kind !== "text")) { this.note = "Nothing to search"; cx?.notify(); return; }
+    if (!this.file || !doc || (doc.kind !== "markdown" && doc.kind !== "text") || this.commitShown()) { this.note = "Nothing to search"; cx?.notify(); return; }
     if (!this.ds) {
       const input = InputState.new({ placeholder: "Find in document…" });
       const ds = this.ds = { input, query: "", hits: [], total: 0, at: 0, heads: [] };
@@ -1046,11 +1076,22 @@ export default class FilePreview extends View {
     if (c === "find-next" || c === "find-prev") { const d = c === "find-next" ? 1 : -1; if (this.ds) this.docStep(d); else this.treeMove(d); return; }
     if (c === "find-enter") { if (this.ts) this.treePick(cx); else this.docStep(1); return; }
     if (c === "find-close") { if (this.ds && this.findSide() === "doc") this.closeDocFind(); else if (this.ts) this.closeTreeFind(cx); else this.closeDocFind(); return; }
+    // Commits: tab:files, tab:commits, commits-scope (all refs / current branch), commits-more,
+    // commit:<row index | hash prefix>, commit-file:<n>, commit-back, commit-close, copy-hash.
+    if (c === "tab:files" || c === "tab:commits") return this.setSide(c.slice(4), cx);
+    if (c === "commits-scope") return this.toggleScope(cx);
+    if (c === "commits-more") return this.loadLog(this.ctx, cx, { more: true });
+    if (c.startsWith("commit:")) return this.commitCmd(c.slice(7), cx);
+    if (c.startsWith("commit-file:")) return this.openAt(Number(c.slice(12)), cx);
+    if (c === "commit-back") return this.commitBack(cx);
+    if (c === "commit-close") { this.closeCommitView(); return; }
+    if (c === "copy-hash") { const d = this.commit?.data; if (d) this.copyBlock(d, cx, d.hash); return; }
     if (c === "find-esc") {
       // Down the focus path, like the bound Esc: only a focused search field answers it.
       try { globalThis.window.dispatch_action(FIND_ESCAPE); } catch (e) { this.note = `find-esc: ${String(e.message ?? e)}`; }
       return;
     }
+    if (this.sideNow() === "commits" && this.commitKey(c, cx)) return;
     this.treeKey(c, cx);
   }
 
@@ -1086,6 +1127,7 @@ export default class FilePreview extends View {
     } else if (k === "tab") this.previewFocus.focus();
     else if (k === "r") this.reload(cx);
     else if (k === "b") this.toggleTree();
+    else if (k === "g" && this.git) this.setSide("commits", cx);
     else return false;
     cx.notify();
     return true;
@@ -1106,13 +1148,16 @@ export default class FilePreview extends View {
     if (a) { cx.stop_propagation(); this.textAct(a, cx); return; }
     let used;
     if (where === "tree") used = this.treeKey(e.key, cx);
+    else if (where === "commits") used = this.commitKey(e.key, cx);
     else if (e.key === "tab") { this.focusTree(true); used = true; }
+    else if (e.key === "backspace" && this.atCommit) { this.commitBack(cx); used = true; }
     else if (e.key === "r") { this.reload(cx); used = true; }
     else if (e.key === "b") { this.toggleTree(); used = true; }
     if (used) { cx.stop_propagation(); cx.notify(); }
   }
 
   openFind(where, cx) {
+    if (where === "commits") return;
     if (where === "tree") this.openTreeFind(cx); else this.openDocFind(cx);
   }
 
@@ -1125,12 +1170,12 @@ export default class FilePreview extends View {
   /** Tree focus; with the tree hidden, the preview (open: show it first). */
   focusTree(open = false) {
     if (!this.treeShown() && open) this.setTree(true);
-    (this.treeShown() ? this.treeFocus : this.previewFocus).focus();
+    (this.treeShown() ? this.sideFocus() : this.previewFocus).focus();
   }
 
   toggleTree() {
     this.setTree(!this.treeShown());
-    (this.treeShown() ? this.treeFocus : this.previewFocus).focus();
+    (this.treeShown() ? this.sideFocus() : this.previewFocus).focus();
   }
 
   /** An explicit hide/show: kept for the next popup or panel (per mode), at any width. */
@@ -1150,7 +1195,7 @@ export default class FilePreview extends View {
     if (w === this.width) return;
     const was = this.treeShown();
     this.width = w;
-    if (was && !this.treeShown() && this.treeFocus.is_focused()) this.previewFocus.focus();   // its element goes
+    if (was && !this.treeShown() && (this.treeFocus.is_focused() || this.commitsFocus.is_focused())) this.previewFocus.focus();   // its element goes
     cx.notify();
   }
 
@@ -1159,7 +1204,8 @@ export default class FilePreview extends View {
     if (!this.overlay) return;
     const f = focused(), open = f && panelOf(f.tab);
     if (open) run("pane.close", { pane: open.pane });   // one panel per tab: the new one replaces it
-    dock({ cwd: this.tree.root || this.ctx?.cwd || null, on: this.ctx?.on ?? null, ...(this.file ? { file: this.tree.abs(this.file) } : {}) });
+    const file = this.memFile();
+    dock({ cwd: this.tree.root || this.ctx?.cwd || null, on: this.ctx?.on ?? null, ...(file ? { file: this.tree.abs(file) } : {}) });
     closeOverlay(this.overlay);
   }
 
@@ -1188,8 +1234,230 @@ export default class FilePreview extends View {
     let path = url.replace(/^file:\/\//i, "").split("#")[0];
     try { path = decodeURI(path); } catch {}
     if (!path) return;
+    // A document as of a commit: a relative link opens its target in that same commit.
+    if (this.atCommit) {
+      if (path.startsWith("/")) { this.note = "Links to absolute paths don't open in a past version"; cx.notify(); return; }
+      return this.openAtPath(normalize(parent(this.atCommit.path) + "/" + path).slice(1), this.atCommit.hash, cx);
+    }
     const abs = path.startsWith("/") ? normalize(path) : normalize(this.tree.abs(parent(this.file ?? "")) + "/" + path);
     this.reveal(abs, cx);
+  }
+
+  // ---- commits ---------------------------------------------------------------
+
+  /** "commits" when chosen and the root is in a repo; else "files". */
+  sideNow() { return this.side === "commits" && this.git ? "commits" : "files"; }
+  sideFocus() { return this.sideNow() === "commits" ? this.commitsFocus : this.treeFocus; }
+
+  /** A tab of the sidebar, remembered per mode. */
+  setSide(side, cx) {
+    if (side === "commits" && !this.git) { this.note = "Not in a git repository"; return; }
+    const had = this.treeFocus.is_focused() || this.commitsFocus.is_focused();
+    this.side = side;
+    setShared(SIDE_KEY + this.mode, side === "commits" ? "commits" : null);
+    if (side === "commits" && this.ctx?.log) this.logCheck(this.ctx, cx);
+    if (had || !this.previewFocus.is_focused()) this.sideFocus().focus();
+    cx?.notify();
+  }
+
+  sideWidth(narrow) {
+    if (narrow) return Math.min(NARROW_TREE_W, Math.round(this.width * 0.55));
+    if (this.sideNow() !== "commits") return TREE_W;
+    return Math.max(TREE_W, Math.min(COMMITS_W, Math.round((this.width ?? 1000) * 0.4)));
+  }
+
+  /**
+   * The history: the first page, or (a refresh) as many commits as are loaded, or the next page.
+   * One run at a time per context; a request meanwhile runs once after it.
+   */
+  loadLog(ctx, cx, { more = false } = {}) {
+    if (!ctx || this.ctx !== ctx || !this.tree.root || this.closed || !cx) return;
+    const log = ctx.log ??= { scope: this.scope, rows: [], index: new Map(), graph: null, remotes: [], more: false, loading: false,
+      again: null, loaded: false, error: null, empty: false, sig: null, cursor: null };
+    if (more && (!log.more || !log.loaded)) return;
+    if (log.loading) { log.again = log.again === "full" || !more ? "full" : "more"; return; }
+    const scope = this.scope, full = !more || log.scope !== scope;
+    const skip = full ? 0 : log.rows.length;
+    const count = full ? Math.max(hist.PAGE, log.scope === scope ? log.rows.length : 0) : hist.PAGE;
+    log.loading = true;
+    const root = this.tree.root;
+    cx.spawn(async (cx) => {
+      let r;
+      try { r = await hist.log(root, ctx.on, { skip, count, scope }); }
+      finally { log.loading = false; log.auto = false; }
+      if (this.ctx !== ctx || ctx.log !== log) return;
+      let again = log.again;
+      log.again = null;
+      if (r && !full && (r.sig !== log.sig || this.scope !== scope)) again = "full";   // history moved between pages
+      else if (r && (r.error || r.notRepo || r.empty)) {
+        Object.assign(log, { rows: [], index: new Map(), graph: null, more: false, loaded: true, sig: null,
+          error: r.error ?? (r.notRepo ? "Not in a git repository" : null), empty: Boolean(r.empty), scope });
+      } else if (r) {
+        if (full) { log.graph = new hist.Graph(); log.rows = []; log.index = new Map(); }
+        for (const c of r.commits) { log.index.set(c.hash, log.rows.length); log.rows.push(log.graph.add(c)); }
+        Object.assign(log, { more: r.more, sig: r.sig, remotes: r.remotes, loaded: true, error: null, empty: false, scope });
+        // The selection survives by hash; else the first row.
+        if (!log.cursor || !log.index.has(log.cursor)) log.cursor = log.rows[0]?.c.hash ?? null;
+      } else if (!log.loaded) log.error = ctx.on ? `Cannot reach ${ctx.on}` : "Cannot run git";
+      cx.notify();
+      if (again) this.loadLog(ctx, cx, { more: again === "more" });
+    });
+  }
+
+  /** Reloads the history when a ref moved (commit, checkout, branch, tag, fetch). Cheap: one checksum. */
+  logCheck(ctx, cx) {
+    const log = ctx?.log;
+    if (!log || this.ctx !== ctx || !cx || log.loading || log.checking) return;
+    log.checking = true;
+    const root = this.tree.root;
+    cx.spawn(async (cx) => {
+      let s;
+      try { s = await hist.signature(root, ctx.on); }
+      finally { log.checking = false; }
+      if (this.ctx === ctx && ctx.log === log && s !== undefined && s !== log.sig) this.loadLog(ctx, cx);
+    });
+  }
+
+  toggleScope(cx) {
+    this.scope = this.scope === "all" ? "head" : "all";
+    this.loadLog(this.ctx, cx);
+    cx.notify();
+  }
+
+  /** Keys on the commit list; true when used. */
+  commitKey(k, cx) {
+    const log = this.ctx?.log, rows = log?.rows ?? [];
+    const i = log?.index.get(log.cursor) ?? -1;
+    const move = (j) => {
+      if (!rows.length) return;
+      j = Math.max(0, Math.min(rows.length - 1, j));
+      log.cursor = rows[j].c.hash;
+      this.commitScroll.scroll_to_item(j);
+      if (j >= rows.length - 10) this.loadLog(this.ctx, cx, { more: true });
+    };
+    if (k === "down") move(i + 1);
+    else if (k === "up") move(i < 0 ? 0 : i - 1);
+    else if (k === "pagedown") move(i + 20);
+    else if (k === "pageup") move(i - 20);
+    else if (k === "home") move(0);
+    else if (k === "end") move(rows.length - 1);
+    else if (k === "enter" || k === "space") { if (rows[i]) this.openCommit(rows[i].c.hash, cx); }
+    else if (k === "tab") this.previewFocus.focus();
+    else if (k === "r") this.reload(cx);
+    else if (k === "b") this.toggleTree();
+    else if (k === "g") this.setSide("files", cx);
+    else return false;
+    cx.notify();
+    return true;
+  }
+
+  commitClick(key, cx) {
+    this.commitsFocus.focus();
+    const log = this.ctx?.log;
+    if (!log) return;
+    if (key === "more") { this.loadLog(this.ctx, cx, { more: true }); cx.notify(); return; }
+    log.cursor = key;
+    this.openCommit(key, cx);
+  }
+
+  /** Dev hook: a row index or a hash prefix. */
+  commitCmd(a, cx) {
+    const log = this.ctx?.log, rows = log?.rows ?? [];
+    const i = /^\d{1,5}$/.test(a) ? Number(a) : rows.findIndex((r) => r.c.hash.startsWith(a));
+    if (!rows[i]) { this.note = `No commit ${a}`; return; }
+    log.cursor = rows[i].c.hash;
+    this.commitScroll.scroll_to_item(i, "center");
+    this.openCommit(rows[i].c.hash, cx);
+  }
+
+  commitShown() { return Boolean(this.commit && !this.atCommit); }
+
+  /** Shows a commit in the preview: header, changed files, diff. The tree's file stays behind it. */
+  openCommit(hash, cx) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (this.atCommit) this.commitBack(cx);
+    if (this.commit?.hash === hash && !this.commit.error) { cx.notify(); return; }
+    this.closeCommitView();
+    if (this.ds) this.closeDocFind(false);
+    this.note = null;
+    const view = this.commit = { hash, data: null, loading: true, error: null };
+    const root = this.tree.root, remotes = ctx.log?.remotes ?? [];
+    cx.spawn(async (cx) => {
+      const d = await hist.show(root, ctx.on, hash, remotes);
+      if (this.commit !== view || this.ctx !== ctx) return;
+      view.loading = false;
+      if (!d || d.error) view.error = d?.error ?? `Cannot reach ${ctx.on ?? "git"}`;
+      else {
+        view.data = d;
+        for (const f of d.files) if (f.diff?.lines.length) { f.runs = this.diffRuns(f.diff.kinds); f.state = this.diffState(f); }
+      }
+      cx.notify();
+    });
+    cx.notify();
+  }
+
+  /** Readonly Editor of one file's diff lines (made here, never in render). */
+  diffState(f) {
+    return EditorState.new({ readonly: true, font_family: settings().font_family, font_size: this.codeFont,
+      value: f.diff.lines.join("\n"), line_numbers: false, folding: false, soft_wrap: false });
+  }
+
+  /** Runs of equal line kinds (a, d, h): one tint each. */
+  diffRuns(kinds) {
+    const out = [];
+    for (let i = 0; i < kinds.length; i++) {
+      const k = kinds[i];
+      if (k === " ") continue;
+      const last = out[out.length - 1];
+      if (last && last.kind === k && last.from + last.n === i) last.n++;
+      else out.push({ from: i, n: 1, kind: k });
+    }
+    return out;
+  }
+
+  closeCommitView() {
+    for (const f of this.commit?.data?.files ?? []) f.state?.release();
+    this.commit = null;
+  }
+
+  /** File n of the shown commit, as of that commit (a deleted one: as of its parent). */
+  openAt(n, cx) {
+    const d = this.commit?.data, f = d?.files[n];
+    if (!f) { this.note = `No file ${n} in this commit`; cx.notify(); return; }
+    this.openAtPath(f.path, f.status === "D" ? `${d.hash}^` : d.hash, cx, f.status === "D");
+  }
+
+  openAtPath(path, rev, cx, deleted = false) {
+    const d = this.commit?.data, ctx = this.ctx, root = this.tree.root;
+    if (!d || !ctx) return;
+    const kept = this.atCommit ? this.atCommit.kept : this.file;
+    const short = d.hash.slice(0, 7);
+    this.atCommit = { hash: d.hash, short, subject: d.subject, path, kept, deleted };
+    this.show(`${short}:${path}`, cx, { read: () => hist.readAt(root, ctx.on, rev, path) });
+    cx.notify();
+  }
+
+  /** From a file at a commit back to the commit; the tree's file is read again behind it. */
+  commitBack(cx) {
+    const a = this.atCommit;
+    if (!a) return;
+    this.atCommit = null;
+    this.show(a.kept ?? null, cx, { quiet: true });
+    cx?.notify();
+  }
+
+  statusName() {
+    if (this.commitShown()) return `commit ${this.commit.hash.slice(0, 7)}`;
+    if (this.atCommit) return `${this.atCommit.path} @ ${this.atCommit.short}`;
+    return this.file ?? "No file";
+  }
+
+  commitParts() {
+    const d = this.commit?.data;
+    if (!d) return [];
+    const add = d.files.reduce((s, f) => s + f.add, 0), del = d.files.reduce((s, f) => s + f.del, 0);
+    return [plural(d.files.length, "file"), `+${add.toLocaleString("en-US")} −${del.toLocaleString("en-US")}`, ...(d.truncated ? ["diff truncated"] : [])];
   }
 
   // ---- UI ----------------------------------------------------------------------
@@ -1207,6 +1475,12 @@ export default class FilePreview extends View {
       cx.spawn(async (cx) => { this.build(cx); this.decorate(); this.runDoc(); cx.notify(); });
     }
     const rows = this.tree.rows(), narrow = this.narrow(), shown = this.treeShown();
+    // The Commits tab asks for the history the first time it shows (once per context).
+    const ctx = this.ctx;
+    if (shown && this.sideNow() === "commits" && ctx && !ctx.log && !ctx.logWanted && this.tree.root) {
+      ctx.logWanted = true;
+      cx.spawn(async (cx) => this.loadLog(ctx, cx));
+    }
     // The expanded diagram replaces the popup's content: nothing under it can take the pointer
     // (no occlusion API), and the EditorStates stay retained for the way back.
     if (this.zoom) return v_flex().id("fp-root").size_full().min_h(0).on_size_change((box, cx) => this.sized(box, cx)).child(this.zoomLayer(t));
@@ -1215,7 +1489,7 @@ export default class FilePreview extends View {
       .child(this.topBar(t))
       .child(h_flex().flex_1().min_h(0)
         .when(narrow || !shown, (el) => el.child(this.strip(t)))
-        .when(shown, (el) => el.child(this.treePane(rows, t, narrow ? Math.min(NARROW_TREE_W, Math.round(this.width * 0.55)) : TREE_W)))
+        .when(shown, (el) => el.child(this.sidePane(rows, t, this.sideWidth(narrow), cx)))
         .child(this.previewPane(t, narrow)))
       .child(this.statusBar(t));
   }
@@ -1247,7 +1521,7 @@ export default class FilePreview extends View {
       .child(div().flex_1().min_w(0).truncate().text_size(12).child(tilde(this.tree.root) || "No folder"))
       .when(Boolean(on), (el) => el.child(div().flex_none().px(6).rounded(4).bg(t.raised).text_size(11)
         .text_color(this.tree.offline ? t.ansi3 : t.muted).child(this.tree.offline ? `${on} · offline` : on)))
-      .when(Boolean(this.doc && (this.doc.kind === "markdown" || this.doc.kind === "text")), (el) =>
+      .when(Boolean(this.doc && (this.doc.kind === "markdown" || this.doc.kind === "text") && !this.commitShown()), (el) =>
         el.child(this.button("fp-find-doc", "search-doc.svg", t, (_e, cx) => this.openDocFind(cx))))
       .child(this.textButton("fp-text-out", "A−", t, (_e, cx) => this.textAct("out", cx)))
       .child(div().id("fp-text-pct").w(40).flex_none().rounded(4).text_center().text_size(11.5).cursor_pointer().hover((s) => s.bg(t.hover))
@@ -1282,11 +1556,11 @@ export default class FilePreview extends View {
       .child(this.button("fp-tree-toggle", this.treeShown() ? "folder-open.svg" : "folder.svg", t, (_e, cx) => { this.toggleTree(); cx.notify(); }));
   }
 
-  treePane(rows, t, w) {
+  treePane(rows, t) {
     const focus = this.treeFocus.is_focused();
     const tree = this.tree, ts = this.ts, searching = Boolean(ts?.query.trim());
     const empty = searching ? null : tree.error || (!tree.loaded ? (tree.offline ? null : this.ctx?.cwd || this.loadingTree ? "Loading files…" : "No folder") : rows.length ? null : "Empty folder");
-    return v_flex().id("fp-tree-pane").w(w).flex_none().h_full().min_h(0).border_r(1).border_color(t.border).bg(t.chrome).text_size(12.5)
+    return v_flex().id("fp-tree-pane").w_full().flex_1().min_h(0)
       .track_focus(this.treeFocus).on_key_down((e, cx) => this.onKey(e, cx, "tree"))
       .key_context(TREE_CONTEXT).on_action(FIND_OPEN, (_e, cx) => this.openTreeFind(cx))
       .when(Boolean(ts), (el) => el.child(this.findBar("tree", t)))
@@ -1372,6 +1646,212 @@ export default class FilePreview extends View {
       .when(Boolean(tint), (el) => el.child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(tint).child(g)));
   }
 
+  /** The sidebar: Files | Commits tabs (in a repo) over the tree or the history. */
+  sidePane(rows, t, w, cx) {
+    const side = this.sideNow();
+    return v_flex().id("fp-side").w(w).flex_none().h_full().min_h(0).border_r(1).border_color(t.border).bg(t.chrome).text_size(12.5)
+      .when(Boolean(this.git), (el) => el.child(h_flex().h(28).flex_none().px(6).gap(2).items_end().border_b(1).border_color(t.border)
+        .child(this.sideTab("files", "Files", side, t)).child(this.sideTab("commits", "Commits", side, t))))
+      .child(side === "commits" ? this.commitsPane(t, w, cx) : this.treePane(rows, t));
+  }
+
+  sideTab(key, label, side, t) {
+    const on = key === side;
+    return h_flex().id(`fp-tab-${key}`).h(27).px(8).items_center().cursor_pointer().text_size(12)
+      .text_color(on ? t.foreground : t.muted).hover((s) => s.text_color(t.foreground))
+      .when(on, (el) => el.border_b(2).border_color(t.accent))
+      .on_click((_e, cx) => this.setSide(key, cx)).child(label);
+  }
+
+  /** The commit list: a toolbar (scope, count) over a virtual list of graph rows. */
+  commitsPane(t, w, cx) {
+    const ctx = this.ctx, log = ctx?.log, rows = log?.rows ?? [], more = Boolean(log?.more);
+    const focus = this.commitsFocus.is_focused(), meta = w >= META_W, open = this.commitShown() || this.atCommit ? this.commit?.hash : null;
+    const lw = meta ? LANE_W : NARROW_LANE_W, max = meta ? MAX_LANES : NARROW_MAX_LANES;
+    const g = { lw, max, h: CROW, width: Math.min(log?.graph?.width ?? 1, max) * lw };
+    let empty = null;
+    if (!log || !log.loaded) empty = log?.error ?? "Loading history…";
+    else if (log.error) empty = log.error;
+    else if (log.empty) empty = "No commits yet";
+    else if (!rows.length) empty = "No commits";
+    const count = rows.length ? `${rows.length.toLocaleString("en-US")}${more ? "+" : ""} commits` : "";
+    return v_flex().id("fp-commits-pane").w_full().flex_1().min_h(0)
+      .track_focus(this.commitsFocus).on_key_down((e, cx) => this.onKey(e, cx, "commits"))
+      .child(h_flex().h(28).flex_none().pl(4).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(h_flex().id("fp-scope").h(22).px(6).gap(5).flex_none().rounded(5).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => this.toggleScope(cx))
+          .child(div().size(7).rounded_full().bg(this.scope === "all" ? t.accent : t.ansi2))
+          .child(div().text_size(11.5).text_color(t.muted).child(this.scope === "all" ? "All branches" : "Current branch")))
+        .child(div().flex_1())
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(count)))
+      .when(rows.length > 0, (el) => el.child(div().flex_1().min_h(0).relative()
+        .child(v_virtual_list("fp-commits", rows.length + (more ? 1 : 0), CROW, (i) => (i < rows.length ? rows[i].c.hash : "more"), (range, rcx) => {
+          // Near the end: the next page, from a task (a renderer can't notify).
+          if (more && range.end >= rows.length - 10 && !log.loading && !log.auto) {
+            log.auto = true;
+            try { (rcx ?? cx).spawn(async (cx) => this.loadLog(ctx, cx, { more: true })); } catch { log.auto = false; }
+          }
+          const out = [];
+          for (let i = range.start; i < range.end; i++) out.push(i < rows.length ? this.commitRow(rows[i], t, { focus, meta, open, g, cursor: log.cursor }) : this.moreRow(log, t));
+          return out;
+        }).track_scroll(this.commitScroll).on_item_click((key, cx) => this.commitClick(key, cx)).size_full())
+        .child(Scrollbar.vertical("fp-commits").viewport_from_layout().absolute().inset_0())))
+      .when(Boolean(empty), (el) => el.child(v_flex().p(10).gap(8).text_color(log?.error ? t.ansi3 : t.dim).child(empty)
+        .when(Boolean(log?.error), (el) => el.child(div().id("fp-retry-log").cursor_pointer().text_color(t.accent).on_click((_e, cx) => this.loadLog(ctx, cx)).child("Retry")))));
+  }
+
+  /**
+   * A commit: graph cell with all its ref flags at the node, subject; author and date when there is room. Pure (list renderer).
+   * The flags push the subject right; when they overflow, the graph box shrinks and clips them and the subject gets no width.
+   */
+  commitRow(row, t, { focus, meta, open, g, cursor }) {
+    const c = row.c, sel = c.hash === cursor, bg = sel ? (focus ? t.selected : t.hover) : t.chrome;
+    const fl = c.flags ?? [];
+    // Flags start right after the row's rightmost lane; past the graph's width they push the subject.
+    const at = reach(row, g.max) * g.lw + 1, color = row.node >= g.max ? t.dim : palette(t)[row.color % hist.COLORS];
+    const graph = !fl.length ? cell(row, t, { ...g, bg })
+      : h_flex().flex_shrink_1().min_w(g.width).h(CROW).relative().items_center().overflow_hidden()
+        .child(cell(row, t, { ...g, bg, flag: at }).absolute().top(0).left(0))
+        .child(div().w(at).h(CROW).flex_none())
+        .children(fl.map((r, i) => this.refFlag(r, t, color, meta ? 140 : 80, i === 0)));
+    return h_flex().h(CROW).w_full().pl(6).pr(8).gap(6).items_center().bg(bg)
+      .child(graph)
+      .child(div().flex_1().min_w(0).truncate().text_color(c.hash === open ? t.accent : t.foreground).when(c.head, (el) => el.font_medium()).child(c.subject))
+      .when(meta, (el) => el
+        .child(div().w(84).flex_none().truncate().text_size(11).text_color(t.muted).child(c.author))
+        .child(div().w(28).flex_none().text_right().text_size(11).text_color(t.dim).child(hist.relative(c.at, true))));
+  }
+
+  /**
+   * One ref flag in the graph, in the node's lane color: branch filled, tag outlined, remote dimmed,
+   * detached HEAD in the foreground color; the checked-out branch bold with a foreground border.
+   * The first flag of a row has a pointer toward the node. "main ⇄ origin": a local branch and its remote
+   * on the same commit (just "main ⇄" when narrow).
+   */
+  refFlag(r, t, lane, maxW, tip) {
+    const H = 16, tag = r.kind === "tag", remote = r.kind === "remote", head = r.kind === "head";
+    const c = head ? t.foreground : lane;
+    const fill = tag ? (tint(c, "26") ?? t.raised) : remote ? (tint(c, "4d") ?? t.raised) : c;
+    const text = tag ? c : remote ? t.foreground : t.chrome;
+    const edge = r.current && !head ? t.foreground : tag ? c : null;
+    const body = h_flex().flex_none().min_w(0).max_w(maxW).h(H).px(5).gap(3).items_center().bg(fill)
+      .when(tip, (el) => el.rounded_r(4)).when(!tip, (el) => el.rounded(4).ml(3))
+      .when(Boolean(edge), (el) => el.border_1().border_color(edge))
+      .child(div().min_w(0).truncate().text_size(10.5).text_color(text).when(r.current || head, (el) => el.font_bold())
+        .child(tag ? `◆ ${r.name}` : r.name))
+      .when(r.also?.length > 0, (el) => el.child(div().flex_none().text_size(10.5).text_color(tint(text, "b3") ?? text)
+        .child(maxW < 100 ? "⇄" : `⇄ ${r.also.join(", ")}`)));
+    if (!tip) return body;
+    return h_flex().flex_none().min_w(0).items_center().child(pointer(remote ? fill : c, 5, H)).child(body);
+  }
+
+  refPill(r, t, maxW) {
+    const color = r.current ? t.accent : r.kind === "tag" ? t.ansi3 : r.kind === "remote" ? t.muted : r.kind === "head" ? t.ansi1 : t.ansi2;
+    return h_flex().flex_none().max_w(maxW).h(17).px(5).items_center().rounded(8).border_1().border_color(tint(color, "66") ?? color)
+      .bg(tint(color, "1f") ?? t.raised).child(div().min_w(0).truncate().text_size(10.5).text_color(color).child(r.kind === "tag" ? `◆ ${r.name}` : r.name));
+  }
+
+  moreRow(log, t) {
+    return h_flex().h(CROW).w_full().justify_center().items_center().text_size(11.5).text_color(t.accent).child(log.loading ? "Loading…" : "Load more");
+  }
+
+  /** The shown commit: header, changed files, diff per file. */
+  commitView(view, t, narrow) {
+    if (view.loading) return this.message(t, "Loading commit…");
+    if (view.error || !view.data) return this.message(t, view.error ?? "Cannot read this commit");
+    const d = view.data;
+    let shown = 0;
+    return v_flex().id(`commit:${d.hash}`).flex_1().min_h(0).overflow_y_scrollbar()
+      .child(h_flex().w_full().justify_center().px(narrow ? 12 : 24).py(narrow ? 12 : 20)
+        .child(v_flex().w_full().max_w(980).gap(Math.round(14 * this.textZoom)).text_size(this.proseSize())
+          .child(this.commitHeader(d, t, narrow))
+          .child(this.commitFiles(d, t))
+          .children(d.files.map((f, i) => { const el = this.diffBlock(f, i, t, shown); shown += f.diff?.lines.length ?? 0; return el; }))
+          .when(d.truncated, (el) => el.child(div().text_size(11.5).text_color(t.ansi3)
+            .child(`Diff truncated: at most ${hist.MAX_FILE_DIFF.toLocaleString("en-US")} lines per file and ${hist.MAX_DIFF.toLocaleString("en-US")} per commit`)))));
+  }
+
+  commitHeader(d, t, narrow) {
+    const mono = typeof settings().font_family === "string" ? String(settings().font_family) : null;
+    const copied = Boolean(d.copied), z = this.textZoom;
+    const label = (s) => div().w(narrow ? 56 : 72).flex_none().text_color(t.dim).child(s);
+    return v_flex().w_full().flex_none().gap(Math.round(8 * z)).p(Math.round(14 * z)).rounded(8).border_1().border_color(t.border).bg(t.raised)
+      .child(h_flex().w_full().gap(8).items_start()
+        .child(div().flex_1().min_w(0).text_size(Math.round(16 * z)).font_bold().child(d.subject || "(no subject)"))
+        .child(this.button("fp-commit-close", "close.svg", t, (_e, cx) => { this.closeCommitView(); cx.notify(); })))
+      .when(d.refs.length > 0, (el) => el.child(h_flex().w_full().flex_wrap().gap(5).children(d.refs.map((r) => this.refPill(r, t, 240)))))
+      .child(v_flex().w_full().gap(4).text_size(Math.round(12.5 * z))
+        .child(h_flex().w_full().gap(8).items_center().child(label("Commit"))
+          .child(div().min_w(0).truncate().text_color(t.foreground).when(Boolean(mono), (e) => e.font_family(mono)).child(d.hash))
+          .child(h_flex().id("fp-copy-hash").h(20).flex_none().px(5).gap(4).rounded(4).items_center().cursor_pointer()
+            .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.copyBlock(d, cx, d.hash))
+            .child(svg(ICON + (copied ? "check.svg" : "copy.svg")).size(13).text_color(copied ? t.done : t.muted))
+            .when(copied, (el) => el.child(div().text_size(11).text_color(t.done).child("Copied")))))
+        .child(h_flex().w_full().gap(8).child(label("Author"))
+          .child(div().flex_1().min_w(0).truncate().child(`${d.author} <${d.email}>`)))
+        .child(h_flex().w_full().gap(8).child(label("Date"))
+          .child(div().flex_1().min_w(0).truncate().child(`${hist.absolute(d.at)} · ${hist.relative(d.at)}`)))
+        .when(d.parents.length > 0, (el) => el.child(h_flex().w_full().gap(8).child(label(d.parents.length > 1 ? "Parents" : "Parent"))
+          .children(d.parents.map((p, i) => div().id(`fp-parent-${i}`).flex_none().cursor_pointer().text_color(t.accent)
+            .when(Boolean(mono), (e) => e.font_family(mono)).on_click((_e, cx) => this.openCommit(p, cx)).child(p.slice(0, 7)))))))
+      .when(Boolean(d.body), (el) => el.child(div().w_full().pt(Math.round(6 * z)).border_t(1).border_color(t.border)
+        .child(TextView.markdown(`msg-${d.hash}`, d.body).selectable(true))));
+  }
+
+  /** The changed files: status letter, path (click: the file as of this commit), +/- counts. */
+  commitFiles(d, t) {
+    const add = d.files.reduce((s, f) => s + f.add, 0), del = d.files.reduce((s, f) => s + f.del, 0);
+    return v_flex().w_full().flex_none().rounded(6).border_1().border_color(t.border).bg(t.background).overflow_hidden().text_size(12.5)
+      .child(h_flex().h(26).px(10).gap(8).items_center().border_b(1).border_color(t.border).text_size(11.5).text_color(t.muted)
+        .child(div().flex_1().child(d.files.length ? plural(d.files.length, "file") + " changed" : "No file changes"))
+        .child(div().text_color(t.ansi2).child(`+${add.toLocaleString("en-US")}`))
+        .child(div().text_color(t.ansi1).child(`−${del.toLocaleString("en-US")}`)))
+      .children(d.files.map((f, i) => h_flex().id(`fp-cfile-${i}`).h(24).px(10).gap(8).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => this.openAt(i, cx))
+        .child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(statusColor(f.status, t)).child(f.status))
+        .child(div().flex_1().min_w(0).truncate().child(f.from ? `${f.from} → ${f.path}` : f.path))
+        .child(div().flex_none().text_size(11).text_color(t.ansi2).child(f.binary ? "bin" : `+${f.add}`))
+        .when(!f.binary, (el) => el.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`−${f.del}`)))));
+  }
+
+  /**
+   * One file's diff: a readonly Editor at the text's full height (the codeBlock trick), with a
+   * tint over each run of added, deleted and hunk-header lines.
+   */
+  diffBlock(f, i, t, before) {
+    const lh = lineHeight(this.codeFont), pad = Math.round(CODE_PAD * this.textZoom);
+    const head = h_flex().id(`fp-dfile-${i}`).h(26).pl(10).pr(8).gap(8).items_center().border_b(1).border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => this.openAt(i, cx))
+      .child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(statusColor(f.status, t)).child(f.status))
+      .child(div().flex_1().min_w(0).truncate().text_size(12).child(f.from ? `${f.from} → ${f.path}` : f.path))
+      .when(!f.binary, (el) => el.child(div().flex_none().text_size(11).text_color(t.ansi2).child(`+${f.add}`)).child(div().flex_none().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
+    const box = v_flex().w_full().flex_none().rounded(6).border_1().border_color(t.border).bg(t.background).overflow_hidden().child(head);
+    const note = (s, c = t.dim) => box.child(div().px(10).py(6).text_size(11.5).text_color(c).child(s));
+    if (f.binary) return note("Binary file");
+    if (!f.state) return f.diff?.cut || before >= hist.MAX_DIFF ? note("Diff not shown: the commit's line limit was reached", t.ansi3) : note("No content changes");
+    const n = f.diff.lines.length, text = n * lh, slack = Math.max(text, 3 * lh);
+    const color = (k) => (k === "a" ? t.ansi2 : k === "d" ? t.ansi1 : t.ansi4);
+    return box
+      .child(div().w_full().h(text + 2 * pad).flex_none().py(pad)
+        .child(div().w_full().h(text).overflow_hidden().relative()
+          .child(div().w_full().h(text + slack).flex_none().child(Editor.new(f.state).size_full()))
+          .children(f.runs.map((r) => div().absolute().left(0).right(0).top(r.from * lh).h(r.n * lh).bg(tint(color(r.kind), r.kind === "h" ? "1a" : "26") ?? t.hover)))
+          .children(f.runs.filter((r) => r.kind !== "h").map((r) => div().absolute().left(0).w(3).top(r.from * lh).h(r.n * lh).bg(color(r.kind))))))
+      .when(f.diff.cut, (el) => el.child(div().px(10).py(4).border_t(1).border_color(t.border).text_size(11).text_color(t.ansi3).child("Diff truncated")));
+  }
+
+  /** Over a file shown as of a commit: which commit, and the way back. */
+  atBanner(t) {
+    const a = this.atCommit;
+    return h_flex().h(30).flex_none().w_full().px(10).gap(8).items_center().border_b(1).border_color(t.border).bg(tint(t.accent, "14") ?? t.raised).text_size(12)
+      .child(div().flex_none().text_color(t.dim).child(a.deleted ? "before" : "at"))
+      .child(div().flex_none().text_color(t.accent).child(a.short))
+      .child(div().flex_none().text_color(t.dim).child("·"))
+      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(`${a.path} · ${a.subject}`))
+      .child(h_flex().id("fp-at-back").h(22).px(6).flex_none().rounded(5).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => this.commitBack(cx)).text_color(t.accent).child("← back to commit"));
+  }
+
   message(t, text, sub) {
     return v_flex().flex_1().items_center().justify_center().gap(6).text_color(t.dim)
       .child(div().text_size(14).child(text)).when(Boolean(sub), (el) => el.child(div().text_size(11.5).child(sub)));
@@ -1407,8 +1887,8 @@ export default class FilePreview extends View {
   }
 
   /** Copies a fence's text (without the fence lines); the button says "Copied" for a moment. */
-  copyBlock(b, cx) {
-    cx.write_to_clipboard(b.text);
+  copyBlock(b, cx, text = b.text) {
+    cx.write_to_clipboard(text);
     const mark = (b.copied ?? 0) + 1;
     b.copied = mark;
     cx.timer.after(COPIED_MS, (cx) => { if (b.copied !== mark) return; b.copied = 0; cx.notify(); });
@@ -1445,7 +1925,8 @@ export default class FilePreview extends View {
   previewPane(t, narrow) {
     const doc = this.doc;
     let body;
-    if (!this.file) body = this.message(t, "Select a file", "↑ ↓ move · → ← open/close folder · Enter open · Tab tree/preview · b show/hide tree · / find · + − 0 zoom · r reload" + (this.overlay ? " · Esc close" : ""));
+    if (this.commitShown()) body = this.commitView(this.commit, t, narrow);
+    else if (!this.file) body = this.message(t, "Select a file", "↑ ↓ move · → ← open/close folder · Enter open · Tab tree/preview · b show/hide tree · / find · + − 0 zoom · r reload" + (this.overlay ? " · Esc close" : ""));
     else if (!doc) body = this.message(t, "Loading…");
     else if (doc.kind === "markdown")
       body = v_flex().id(`doc:${this.file}`).flex_1().min_h(0).overflow_y_scrollbar()
@@ -1460,6 +1941,7 @@ export default class FilePreview extends View {
     return v_flex().id("fp-preview-pane").flex_1().min_w(0).h_full().min_h(0).bg(t.surface)
       .track_focus(this.previewFocus).on_key_down((e, cx) => this.onKey(e, cx, "preview"))
       .key_context(DOC_CONTEXT).on_action(FIND_OPEN, (_e, cx) => this.openDocFind(cx))
+      .when(Boolean(this.atCommit), (el) => el.child(this.atBanner(t)))
       .when(Boolean(this.ds), (el) => el.child(this.findBar("doc", t)))
       .child(body);
   }
@@ -1539,8 +2021,9 @@ export default class FilePreview extends View {
   }
 
   statusBar(t) {
-    const doc = this.doc, parts = [];
-    if (this.file && (!doc || doc.kind === "markdown" || doc.kind === "text")) parts.push(lang.label(this.file));
+    const doc = this.commitShown() ? null : this.doc, parts = [];
+    if (this.commitShown()) parts.push(...this.commitParts());
+    else if (this.file && (!doc || doc.kind === "markdown" || doc.kind === "text")) parts.push(lang.label(this.file));
     if (doc?.truncated) parts.push(`Truncated: showing the first ${(LIMIT / 1e6).toFixed(0)} MB${doc.size ? ` of ${(doc.size / 1e6).toFixed(1)} MB` : ""}`);
     if (doc?.kind === "markdown") {
       const n = this.blocks.filter((b) => b.kind === "code").length;
@@ -1551,13 +2034,13 @@ export default class FilePreview extends View {
     const where = this.docWhere();
     if (where) parts.push(`Find: ${where}`);
     if (this.note) parts.push(this.note);
-    if (this.file && this.loadedAt && doc && doc.kind !== "missing") parts.push(ago(this.loadedAt));
+    if (this.file && this.loadedAt && doc && doc.kind !== "missing" && !this.atCommit) parts.push(ago(this.loadedAt));
     if (this.ctx?.polling) parts.push("polling (folder too big to watch)");
     return h_flex().h(22).flex_none().px(10).gap(10).items_center().overflow_hidden().border_t(1).border_color(t.border).bg(t.chrome).text_size(11).text_color(t.dim)
-      .when(this.loadingFile || this.loadingTree || this.blocks.some((b) => b.d?.pending), (el) => el.child(div().w(10).flex_none().text_color(t.accent).frames(SPIN, 90).child(SPIN[0])))
-      .child(div().flex_none().max_w(480).truncate().text_color(this.file ? t.muted : t.dim).child(this.file ?? "No file"))
+      .when(this.loadingFile || this.loadingTree || this.blocks.some((b) => b.d?.pending) || Boolean(this.commit?.loading || this.ctx?.log?.loading), (el) => el.child(div().w(10).flex_none().text_color(t.accent).frames(SPIN, 90).child(SPIN[0])))
+      .child(div().flex_none().max_w(480).truncate().text_color(this.file || this.commit ? t.muted : t.dim).child(this.statusName()))
       .children(parts.map((p) => div().flex_none().child("· " + p)))
       .child(div().flex_1())
-      .child(div().flex_none().child(this.treeFocus.is_focused() ? "tree" : this.previewFocus.is_focused() ? "preview" : ""));
+      .child(div().flex_none().child(this.treeFocus.is_focused() ? "tree" : this.commitsFocus.is_focused() ? "commits" : this.previewFocus.is_focused() ? "preview" : ""));
   }
 }

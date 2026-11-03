@@ -32,7 +32,7 @@ export async function readSource(path, on) {
   return classify(path, text, false);
 }
 
-function classify(path, text, cut) {
+export function classify(path, text, cut) {
   if (text.includes("\0")) return { kind: "binary", message: "Binary file · no preview" };
   let truncated = cut;
   if (text.length > LIMIT) {

@@ -98,6 +98,34 @@ as a panel docked to the right of the terminal.
   - `Enter` / `↓` / `n` go to the next block (or line), `shift-Enter` / `↑` / `shift-n`
     to the previous one, `Esc` closes the bar. The search survives live reload and is
     cleared when you open another file.
+- **Commit history** (GitLab-style graph). Inside a git repository the sidebar has two
+  tabs, **Files | Commits**; the choice is remembered separately for the popup and the
+  panel, and the tabs are hidden outside a repository.
+  - The Commits tab lists `git log --topo-order` of every branch, tag and remote ref plus
+    `HEAD` (stashes are left out), 300 commits at a time; the next page loads when you
+    scroll or move near the end, or with the "Load more" row. The **All branches /
+    Current branch** button switches to `git log HEAD`.
+  - Each row has the graph cell (one colored lane per branch, curves where branches fork
+    and merge, a node per commit, a ring for merges, an outlined node for `HEAD`), ref
+    labels GitLab-style at the node (a flag pointing at it, in the lane's color: branches
+    filled, ◆ tags outlined, remotes dimmed, the checked-out branch bold, `main ⇄ origin`
+    when a branch and its remote agree; every ref is shown, the checked-out branch first, then
+    main/master/develop, other branches and tags, newest version first; flags that don't fit are cut at the
+    row's edge and hide that row's subject), the subject, and, when the sidebar is at least 360 px wide, the author and a short
+    relative date. Up to 10 lanes are drawn (6 in a narrow sidebar).
+  - Click a commit, or `Enter` on it, to show it in the preview: subject, refs, full hash
+    with a copy button, author and email, absolute and relative date, clickable parents,
+    the message body rendered as Markdown, the changed files with status letters
+    (A/M/D/R) and `+`/`−` counts, and the diff of each file with tinted added, removed
+    and hunk-header lines. Merges show the diff against their first parent.
+  - Click a changed file (in the list or a diff header) to open it **as of that commit**
+    through the normal preview (Markdown, Mermaid, highlighting, zoom), under a banner
+    "at <hash> · <path> · <subject> · ← back to commit". A deleted file opens as of the
+    commit's parent. Relative links in such a document open their target in the same
+    commit. `Backspace` or the banner button goes back to the commit.
+  - The list refreshes when a ref moves (commit, checkout, branch, tag, fetch): the mod
+    compares a checksum of `HEAD` and every ref on each git refresh, and keeps the
+    selected commit by hash. Works on remote spaces.
 - **Live reload**: the open file and the expanded folders update as files change. Local
   spaces use a file watcher. Remote spaces poll: every 2.5 s for the open file and every
   10 s for the tree.
@@ -108,7 +136,8 @@ as a panel docked to the right of the terminal.
 ## Requirements
 
 - **Herdr app** on macOS or Linux. Remote spaces need a Unix machine with `sh` and `stat`.
-- **Optional, for git change marks:** `git` on the machine that holds the files.
+- **Optional, for git change marks and the commit history:** `git` on the machine that holds
+  the files (2.31 or later for merge diffs against the first parent).
 - **Optional, for Mermaid diagrams:**
   - [`@mermaid-js/mermaid-cli`](https://github.com/mermaid-js/mermaid-cli) (`mmdc`):
     `npm install -g @mermaid-js/mermaid-cli`
@@ -135,7 +164,8 @@ Without mermaid-cli everything else works, and diagrams appear as source code.
 As the herdr.dev guidance asks, here is what the mod does outside its own folder:
 
 - It **runs programs** with `exec`: `sh` (folder listings, `stat`, file probes, and
-  read-only `git rev-parse`, `git status` and `git diff`, which never write under `.git`),
+  read-only `git rev-parse`, `git status`, `git diff`, `git log`, `git show`,
+  `git cat-file` and `git for-each-ref`, which never write under `.git`),
   `node` with `mmdc`, which starts headless Chrome, and `open` or `xdg-open` for links
   you click. Login shells are only used to look up `mmdc`.
 - It **reads files anywhere** under the folder you browse, on local or remote machines.
@@ -190,9 +220,14 @@ Inside the mod:
 | `/` or `cmd-f` | Find a file (tree focused) or find in the document (preview focused) |
 | `n` / `shift-n` | Next / previous match block while the document search is open (preview focused) |
 | `b` | Hide or show the file tree (remembered separately for the popup and the panel) |
+| `g` | Switch the sidebar between Files and Commits (in a git repository) |
+| `Backspace` | Back to the commit from a file shown as of that commit (preview focused) |
 | `+` (or `=`) / `-` | Reading zoom in / out (70 % to 200 %; remembered separately for the popup and the panel) |
 | `0` | Reading zoom back to 100 % |
 | `Esc` | Close the popup |
+
+In the Commits tab, `↑` `↓` `PageUp` `PageDown` `Home` `End` move the selection and `Enter`
+(or `Space`) shows the selected commit; `Tab`, `r`, `b` and `g` work as in the tree.
 
 In a search field (keys typed there never trigger the shortcuts above):
 
@@ -254,6 +289,15 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
   45 ms at 2,000. In a repository, a code file up to that size scrolls as a whole page:
   its horizontal scrollbar is hidden (scroll sideways with the trackpad), and moving the
   cursor with the keyboard doesn't scroll the view.
+- **Commit history:** pages use `--skip`, so each "Load more" re-walks the history in
+  topological order; on very large repositories (hundreds of thousands of commits) the
+  first page itself can take seconds. A commit's diff is capped at 1,000 lines per file
+  and 3,000 per commit (and 2 MB of patch), with "Diff truncated" notes; diff lines are
+  plain text (Herdr's editor has no diff highlighting) with tinted backgrounds, and long
+  lines scroll sideways with the trackpad only. Lanes past the 10th (6th in a narrow
+  sidebar) aren't drawn; such a commit's node sits, hollow, on the last column. The graph
+  column is as wide as the widest part of the loaded history. There is no search,
+  checkout, cherry-pick or blame: the history is read-only.
 - Git marks compare with `HEAD` only; there is no inline diff, blame or staging. A
   repository with more than 20,000 changed or untracked files shows the first 20,000.
 - Embedded Markdown images, PDF, CSV-as-table and HTML rendering are out of scope.
@@ -278,7 +322,7 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 ## Repository layout
 
 ```
-mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, git.js, find.js, memory.js, mermaid.js, zoom.js, dock.js, icons/)
+mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, git.js, commits.js, graph.js, find.js, memory.js, mermaid.js, zoom.js, dock.js, icons/)
 mods/file-preview-panel/   launcher for the right panel (main.js, dock.js copy)
 scripts/sync.sh            install / update into ~/.config/herdr-app/mods/
 scripts/make-big-md.sh     generates docs/fixtures/big.md (> 1 MB, not versioned)

@@ -3,7 +3,7 @@ import { exec } from "herdr";
 
 // Reads that write nothing under .git (no index refresh, lock or fsmonitor cookie): the folder
 // watch would see the write and start the next refresh. quotepath=off keeps UTF-8 names raw.
-const GIT = 'g() { git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=off -c diff.autoRefreshIndex=false -C "$r" "$@"; }';
+export const GIT = 'g() { git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=off -c diff.autoRefreshIndex=false -C "$r" "$@"; }';
 
 // $1 root (git -C, so a remote root works the same). Prints "<prefix of the root in its repo>\0" then the porcelain status.
 // Exit 4: no git; 5: not a work tree.
