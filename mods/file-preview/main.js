@@ -2,7 +2,7 @@
 // Markdown (prose in TextView, fences highlighted in readonly Editors, Mermaid as PNG) and code.
 // It follows the focused terminal (local or remote space) and reloads what it shows when it changes.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, settings, props, closeOverlay, openOverlay, nextCommand, home, window, run, shared, setShared } from "herdr";
 import { Tree, parent, PER_FOLDER, TOTAL } from "./tree.js";
 import { readSource, stamp, LIMIT } from "./source.js";
@@ -12,6 +12,7 @@ import { Mermaid, fnv1a, cacheKey, themeOf } from "./mermaid.js";
 import { dock, panelOf, size } from "./dock.js";
 import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
 import * as git from "./git.js";
+import { listFiles, rank, occurrences, headings, section, FIND_CONTEXT, FIND_ESCAPE, FIND_OPEN, TREE_CONTEXT, DOC_CONTEXT } from "./find.js";
 
 const ICON = "mods/file-preview/icons/";
 const ROW = 22;              // tree row height
@@ -41,6 +42,7 @@ const POLL_GIT = 5000;
 const FULL_MAX = 1000;       // code files up to this many rows get a line gutter; longer ones, the ruler
 const GUTTER = 8, RULER = 8;
 const BAR_X = 8;             // a Markdown block's bar sits this far left of the column
+const FILES_EVERY = 5000;    // an open file search re-lists the root at most this often
 
 /** Reading zoom action of an unmodified key: "in" | "out" | "reset" | null. */
 function textKey(e) {
@@ -103,6 +105,9 @@ function rowCount(text) {
 /** Color of a git letter: conflict red, modified yellow, added or untracked green. */
 const gitColor = (g, t) => (g === "!" ? t.ansi1 : g === "M" ? t.ansi3 : t.ansi2);
 const barColor = (kind, t) => (kind === "a" ? t.ansi2 : t.ansi4);
+/** A theme color with an alpha byte ("#rrggbb" only), else null. */
+const tint = (c, a) => (typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c + a : null);
+const matches = (n) => `${n.toLocaleString("en-US")} match${n === 1 ? "" : "es"}`;
 
 function syntax() {
   const t = theme();
@@ -120,11 +125,20 @@ export default class FilePreview extends View {
     // Esc is the app's (it closes the popup's dialog before on_key_down sees it):
     // a binding of our own, scoped to the expanded diagram's key context, comes first.
     try { cx.bind_keys([{ keystroke: "escape", action: ZOOM_ESCAPE, context: ZOOM_CONTEXT }]); } catch {}
+    // The same for a search field; cmd-f opens the search of the pane that has the keyboard.
+    try {
+      cx.bind_keys([{ keystroke: "escape", action: FIND_ESCAPE, context: FIND_CONTEXT },
+        { keystroke: "cmd-f", action: FIND_OPEN, context: TREE_CONTEXT }, { keystroke: "cmd-f", action: FIND_OPEN, context: DOC_CONTEXT }]);
+    } catch {}
     // A panel's expanded diagram: this copy is only that dialog (no tree, context or watchers).
     if (this.mode === "diagram") return this.initDiagram(p, cx);
     this.treeFocus = cx.focus_handle();
     this.previewFocus = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
+    this.findScroll = VirtualListScrollHandle.new();
+    this.ts = null;         // file search of the tree: { input, query, results, total, at, ... }
+    this.ds = null;         // search in the shown document: { input, query, hits, total, at, heads }
+    this.inInput = false;   // the key on its way up came from a search field
     this.cursor = null;     // keyboard row (rel path)
     this.file = null;       // shown file (rel path)
     this.doc = null;        // what readSource returned, plus segments for Markdown
@@ -186,6 +200,10 @@ export default class FilePreview extends View {
     if (this.ctx) this.stop(this.ctx);
     this.ctx = null;
     this.scroll?.release();
+    this.findScroll?.release();
+    this.ts?.input.release();
+    this.ds?.input.release();
+    this.ts = this.ds = null;
     this.treeFocus?.release();
     this.previewFocus?.release();
   }
@@ -201,6 +219,7 @@ export default class FilePreview extends View {
     this.tree = new Tree(cwd, this.ctx.on);
     this.git = null;        // { files, folders } of the root's repo; null outside one
     this.cursor = null;
+    if (this.ts) this.closeTreeFind(null, false);
     this.show(null);
     const c = this.ctx;
     c.tasks.push(cx.timer.every(POLL_GIT, (cx) => this.gitRefresh(c, cx)));
@@ -271,6 +290,7 @@ export default class FilePreview extends View {
       // Remote: poll even when the first listing failed, so an offline machine recovers by itself.
       if ((tree.loaded || ctx.on) && !ctx.watching) this.watch(ctx, cx);
       this.gitRefresh(ctx, cx);
+      this.filesChanged(ctx, cx);
       cx.notify();
       const q = ctx.queued;
       ctx.queued = undefined;
@@ -455,7 +475,7 @@ export default class FilePreview extends View {
       this.cursor = rel;
       const i = tree.rows().findIndex((r) => r.path === rel);
       if (i >= 0) this.scroll.scroll_to_item(i, "center");
-      this.show(rel, cx, opts);
+      if (!opts.treeOnly) this.show(rel, cx, opts);
       cx.notify();
     });
   }
@@ -475,7 +495,7 @@ export default class FilePreview extends View {
    */
   show(rel, cx, { quiet = false, keep = false } = {}) {
     const seq = ++this.seq;
-    if (rel !== this.file) { this.release(); this.doc = null; this.stamp = null; this.loadedAt = null; this.marks = null; this.codeMarks = null; }
+    if (rel !== this.file) { this.release(); this.doc = null; this.stamp = null; this.loadedAt = null; this.marks = null; this.codeMarks = null; if (this.ds) this.closeDocFind(false); }
     this.file = rel;
     if (!quiet) { this.note = null; this.loadingFile = Boolean(rel); }
     if (!rel || !cx) { this.loadingFile = false; return; }
@@ -501,6 +521,7 @@ export default class FilePreview extends View {
       this.loadedAt = Date.now();
       if (!this.patch(prev, cx)) this.build(cx);
       this.decorate();
+      this.runDoc();
       this.refreshMarks(cx);
       cx.notify();
     });
@@ -690,6 +711,229 @@ export default class FilePreview extends View {
     cx.notify();
   }
 
+  // ---- search ----------------------------------------------------------------
+
+  /** The tree's file search: a field over the tree; a non-empty query lists matching paths. */
+  openTreeFind(cx) {
+    if (!this.tree.root) return;
+    this.focusTree(true);
+    if (!this.ts) {
+      const input = InputState.new({ placeholder: "Find a file…" });
+      const ts = this.ts = { input, query: "", results: [], total: 0, at: 0, pool: null, poolQ: null, poolData: null, opened: null };
+      input.on("change", (_e, cx) => { if (this.ts === ts && input.value() !== ts.query) this.treeQuery(input.value(), cx); });
+      input.on("submit", (_e, cx) => { if (this.ts === ts) { this.treePick(cx); cx.notify(); } });
+    }
+    this.ts.input.focus();
+    this.loadFiles(this.ctx, cx);
+    cx?.notify();
+  }
+
+  /** Esc or ✕: back to the tree, on the file opened from the results. */
+  closeTreeFind(cx, reveal = true) {
+    const ts = this.ts;
+    if (!ts) return;
+    this.ts = null;
+    ts.input.release();
+    if (!cx) return;
+    this.treeFocus.focus();
+    if (reveal && ts.opened && ts.opened === this.file) this.reveal(ts.opened, cx, { treeOnly: true });
+    cx.notify();
+  }
+
+  /** Lists the root's files once per context (again when stale); one run at a time. */
+  loadFiles(ctx, cx) {
+    if (!ctx || this.ctx !== ctx || !this.tree.root || !cx) return;
+    const f = ctx.files ??= { data: null, loading: false, stale: true, error: null, at: 0 };
+    if (f.loading || !f.stale) return;
+    f.loading = true; f.stale = false; f.at = Date.now();
+    const root = this.tree.root;
+    cx.spawn(async (cx) => {
+      try { f.data = await listFiles(root, ctx.on); f.error = null; }
+      catch (e) { f.error = String(e.message ?? e); }
+      finally { f.loading = false; }
+      if (this.ctx !== ctx) return;
+      if (this.ts) {
+        if (f.stale) this.loadFiles(ctx, cx);   // changed meanwhile
+        this.treeQuery(this.ts.query, cx, true);
+      }
+      cx.notify();
+    });
+  }
+
+  /** The tree changed: the next search re-lists; an open one now, at most every FILES_EVERY ms. */
+  filesChanged(ctx, cx) {
+    const f = ctx.files;
+    if (!f) return;
+    f.stale = true;
+    if (this.ts && !f.loading && Date.now() - f.at >= FILES_EVERY) this.loadFiles(ctx, cx);
+  }
+
+  treeQuery(q, cx, fresh = false) {
+    const ts = this.ts;
+    if (!ts) return;
+    const keep = ts.results[ts.at]?.path;
+    ts.query = q;
+    const f = this.ctx?.files, data = f?.data, norm = q.toLowerCase().replace(/\s+/g, "");
+    if (f?.stale && Date.now() - f.at >= FILES_EVERY) this.loadFiles(this.ctx, cx);
+    if (!data || !norm) { ts.results = []; ts.total = 0; ts.pool = null; ts.poolQ = null; ts.at = 0; cx.notify(); return; }
+    // A longer query only narrows the last one's matches.
+    const pool = !fresh && ts.pool && ts.poolData === data && ts.poolQ && norm.startsWith(ts.poolQ) ? ts.pool : null;
+    const r = rank(data, q, pool);
+    ts.results = r.results; ts.total = r.total; ts.pool = r.pool; ts.poolQ = norm; ts.poolData = data;
+    // A re-list keeps the selected row; typing starts at the top.
+    const i = fresh && keep ? ts.results.findIndex((x) => x.path === keep) : -1;
+    ts.at = Math.max(0, i);
+    this.findScroll.scroll_to_item(ts.at);
+    cx.notify();
+  }
+
+  treeMove(d) {
+    const ts = this.ts;
+    if (!ts?.results.length) return;
+    ts.at = Math.max(0, Math.min(ts.results.length - 1, ts.at + d));
+    this.findScroll.scroll_to_item(ts.at);
+  }
+
+  /** Enter on a result: opens it; the field keeps the keyboard. */
+  treePick(cx) {
+    const r = this.ts?.results[this.ts.at];
+    if (!r) return;
+    this.ts.opened = r.path;
+    this.cursor = r.path;
+    this.show(r.path, cx);
+  }
+
+  findClick(path, cx) {
+    const ts = this.ts;
+    if (!ts) return;
+    const i = ts.results.findIndex((r) => r.path === path);
+    if (i < 0) return;
+    ts.at = i;
+    this.treePick(cx);
+    ts.input.focus();
+    cx.notify();
+  }
+
+  /** Search in the shown document: marks the blocks (or lines) with matches; it can't scroll to them. */
+  openDocFind(cx) {
+    const doc = this.doc;
+    if (!this.file || !doc || (doc.kind !== "markdown" && doc.kind !== "text")) { this.note = "Nothing to search"; cx?.notify(); return; }
+    if (!this.ds) {
+      const input = InputState.new({ placeholder: "Find in document…" });
+      const ds = this.ds = { input, query: "", hits: [], total: 0, at: 0, heads: [] };
+      input.on("change", (_e, cx) => { if (this.ds === ds && input.value() !== ds.query) this.docQuery(input.value(), cx); });
+      input.on("submit", (e, cx) => { if (this.ds === ds) { this.docStep(e?.shift ? -1 : 1); cx.notify(); } });
+    }
+    this.ds.input.focus();
+    cx?.notify();
+  }
+
+  closeDocFind(focus = true) {
+    const ds = this.ds;
+    if (!ds) return;
+    this.ds = null;
+    for (const b of this.blocks) b.find = null;
+    ds.input.release();
+    if (focus) this.previewFocus.focus();
+  }
+
+  docQuery(q, cx) {
+    const ds = this.ds;
+    if (!ds) return;
+    ds.query = q;
+    ds.at = 0;
+    this.runDoc();
+    cx.notify();
+  }
+
+  /**
+   * Matches of the query in the document's source (case-insensitive): per line in a code file,
+   * per block in Markdown. Run again after every load, so a live reload keeps the search.
+   */
+  runDoc() {
+    for (const b of this.blocks) b.find = null;
+    const ds = this.ds, doc = this.doc;
+    if (!ds) return;
+    ds.hits = []; ds.total = 0;
+    const q = ds.query.toLowerCase();
+    if (!q || !doc) return;
+    if (doc.kind === "text") {
+      const o = occurrences(doc.text, q);
+      ds.hits = o.lines.map((l) => ({ line: l.line + 1, n: l.n }));
+      ds.total = o.total;
+    } else if (doc.kind === "markdown") {
+      ds.heads = headings(this.blocks);
+      for (const b of this.blocks) {
+        const o = occurrences(b.text, q);
+        if (!o.total) continue;
+        // A fence's text starts under its opening line; a prose chunk at its first line.
+        const first = b.kind === "md" ? b.start : b.start + 1;
+        b.find = { n: o.total, rows: o.lines.map((l) => l.line), current: false };
+        ds.hits.push({ block: b, line: first + o.lines[0].line, n: o.total });
+        ds.total += o.total;
+      }
+    }
+    ds.at = Math.max(0, Math.min(ds.hits.length - 1, ds.at));
+    const cur = ds.hits[ds.at]?.block;
+    if (cur) cur.find.current = true;
+  }
+
+  /** Next (1) or previous (-1) block or line with matches, wrapping around. */
+  docStep(d) {
+    const ds = this.ds, n = ds?.hits.length;
+    if (!n) return;
+    const old = ds.hits[ds.at]?.block;
+    if (old) old.find.current = false;
+    ds.at = (ds.at + d + n) % n;
+    const cur = ds.hits[ds.at].block;
+    if (cur) cur.find.current = true;
+  }
+
+  /** "block 3 of 7 · line 120 · Heading": where the current match is, since the view can't go there. */
+  docWhere() {
+    const ds = this.ds, h = ds?.hits[ds.at];
+    if (!h) return null;
+    const what = this.doc?.kind === "text" ? "line" : "block";
+    const sec = what === "block" ? section(ds.heads, h.line) : null;
+    return `${what} ${ds.at + 1} of ${ds.hits.length} · line ${h.line}` + (sec ? ` · ${sec.text}` : "");
+  }
+
+  /** "tree" | "doc" for a command without a side: the open search, else the pane with the keyboard. */
+  findSide() {
+    if (this.previewFocus.is_focused()) return "doc";
+    if (this.treeFocus.is_focused()) return "tree";
+    return this.ds && !this.ts ? "doc" : "tree";
+  }
+
+  /** Dev hook: opens a search with a query, as if typed. */
+  findCmd(side, q, cx) {
+    if (side === "tree") {
+      this.openTreeFind(cx);
+      if (!this.ts) return;
+      this.ts.input.set_value(q);
+      this.treeQuery(q, cx);
+    } else {
+      this.openDocFind(cx);
+      if (!this.ds) return;
+      this.ds.input.set_value(q);
+      this.docQuery(q, cx);
+    }
+  }
+
+  /** Keys typed into a search field: arrows act here, the rest stays in the field. */
+  findKey(e, cx, side) {
+    const m = e.modifiers;
+    if (!m.platform && !m.control && !m.alt) {
+      if (side === "tree") {
+        const d = { down: 1, up: -1, pagedown: 10, pageup: -10 }[e.key];
+        if (d) { cx.stop_propagation(); this.treeMove(d); cx.notify(); return; }
+      } else if (e.key === "down" || e.key === "up") {
+        cx.stop_propagation(); this.docStep(e.key === "down" ? 1 : -1); cx.notify(); return;
+      }
+    }
+    this.inInput = true;   // the pane's on_key_down, next on the way up, leaves it alone
+  }
+
   // ---- keyboard --------------------------------------------------------------
 
   command(c, cx) {
@@ -713,6 +957,19 @@ export default class FilePreview extends View {
     }
     // Forgets the stored tree choice of this mode (back to the defaults).
     if (c === "tree-reset") { this.treePref = null; setShared(TREE_KEY + this.mode, null); return; }
+    // Search: tree-find:<q>, doc-find:<q>, find:<q> (the pane with the keyboard), find-next,
+    // find-prev, find-enter (open the selected result), find-close, find-esc (the Esc action).
+    if (c.startsWith("tree-find:")) return this.findCmd("tree", c.slice(10), cx);
+    if (c.startsWith("doc-find:")) return this.findCmd("doc", c.slice(9), cx);
+    if (c.startsWith("find:")) return this.findCmd(this.findSide(), c.slice(5), cx);
+    if (c === "find-next" || c === "find-prev") { const d = c === "find-next" ? 1 : -1; if (this.ds) this.docStep(d); else this.treeMove(d); return; }
+    if (c === "find-enter") { if (this.ts) this.treePick(cx); else this.docStep(1); return; }
+    if (c === "find-close") { if (this.ds && this.findSide() === "doc") this.closeDocFind(); else if (this.ts) this.closeTreeFind(cx); else this.closeDocFind(); return; }
+    if (c === "find-esc") {
+      // Down the focus path, like the bound Esc: only a focused search field answers it.
+      try { globalThis.window.dispatch_action(FIND_ESCAPE); } catch (e) { this.note = `find-esc: ${String(e.message ?? e)}`; }
+      return;
+    }
     this.treeKey(c, cx);
   }
 
@@ -754,9 +1011,16 @@ export default class FilePreview extends View {
   }
 
   onKey(e, cx, where) {
+    if (this.inInput) { this.inInput = false; return; }   // typed into a search field
     const m = e.modifiers;
+    if (m.platform && !m.control && !m.alt && e.key === "f") { cx.stop_propagation(); this.openFind(where, cx); return; }
     if (m.platform || m.control || m.alt) return;
     if (e.key === "escape") { if (this.overlay) closeOverlay(this.overlay); return; }
+    if (e.key === "/" || e.key_char === "/") { cx.stop_propagation(); this.openFind(where, cx); return; }
+    // n / shift-n: next and previous match block while the document has the keyboard.
+    if (where === "preview" && this.ds && (e.key === "n" || e.key === "N")) {
+      cx.stop_propagation(); this.docStep(m.shift || e.key === "N" ? -1 : 1); cx.notify(); return;
+    }
     const a = textKey(e);
     if (a) { cx.stop_propagation(); this.textAct(a, cx); return; }
     let used;
@@ -765,6 +1029,10 @@ export default class FilePreview extends View {
     else if (e.key === "r") { this.reload(cx); used = true; }
     else if (e.key === "b") { this.toggleTree(); used = true; }
     if (used) { cx.stop_propagation(); cx.notify(); }
+  }
+
+  openFind(where, cx) {
+    if (where === "tree") this.openTreeFind(cx); else this.openDocFind(cx);
   }
 
   // ---- panel ----------------------------------------------------------
@@ -855,7 +1123,7 @@ export default class FilePreview extends View {
     if (settings().dark !== this.dark) {
       // Theme flipped: syntax colors are baked into the EditorStates, so rebuild them (outside render).
       this.dark = settings().dark;
-      cx.spawn(async (cx) => { this.build(cx); this.decorate(); cx.notify(); });
+      cx.spawn(async (cx) => { this.build(cx); this.decorate(); this.runDoc(); cx.notify(); });
     }
     const rows = this.tree.rows(), narrow = this.narrow(), shown = this.treeShown();
     // The expanded diagram replaces the popup's content: nothing under it can take the pointer
@@ -894,9 +1162,12 @@ export default class FilePreview extends View {
     const on = this.ctx?.on;
     return h_flex().h(28).flex_none().pl(4).pr(10).gap(6).items_center().border_b(1).border_color(t.border).bg(t.chrome)
       .child(this.button("fp-tree-bar", "sidebar.svg", t, (_e, cx) => { this.toggleTree(); cx.notify(); }))
+      .child(this.button("fp-find-tree", "search.svg", t, (_e, cx) => this.openTreeFind(cx)))
       .child(div().flex_1().min_w(0).truncate().text_size(12).child(tilde(this.tree.root) || "No folder"))
       .when(Boolean(on), (el) => el.child(div().flex_none().px(6).rounded(4).bg(t.raised).text_size(11)
         .text_color(this.tree.offline ? t.ansi3 : t.muted).child(this.tree.offline ? `${on} · offline` : on)))
+      .when(Boolean(this.doc && (this.doc.kind === "markdown" || this.doc.kind === "text")), (el) =>
+        el.child(this.button("fp-find-doc", "search-doc.svg", t, (_e, cx) => this.openDocFind(cx))))
       .child(this.textButton("fp-text-out", "A−", t, (_e, cx) => this.textAct("out", cx)))
       .child(div().id("fp-text-pct").w(40).flex_none().rounded(4).text_center().text_size(11.5).cursor_pointer().hover((s) => s.bg(t.hover))
         .text_color(this.textZoom === 1 ? t.dim : t.foreground).on_click((_e, cx) => this.textAct("reset", cx))
@@ -932,24 +1203,92 @@ export default class FilePreview extends View {
 
   treePane(rows, t, w) {
     const focus = this.treeFocus.is_focused();
-    const tree = this.tree;
-    const empty = tree.error || (!tree.loaded ? (tree.offline ? null : this.ctx?.cwd || this.loadingTree ? "Loading files…" : "No folder") : rows.length ? null : "Empty folder");
+    const tree = this.tree, ts = this.ts, searching = Boolean(ts?.query.trim());
+    const empty = searching ? null : tree.error || (!tree.loaded ? (tree.offline ? null : this.ctx?.cwd || this.loadingTree ? "Loading files…" : "No folder") : rows.length ? null : "Empty folder");
     return v_flex().id("fp-tree-pane").w(w).flex_none().h_full().min_h(0).border_r(1).border_color(t.border).bg(t.chrome).text_size(12.5)
       .track_focus(this.treeFocus).on_key_down((e, cx) => this.onKey(e, cx, "tree"))
+      .key_context(TREE_CONTEXT).on_action(FIND_OPEN, (_e, cx) => this.openTreeFind(cx))
+      .when(Boolean(ts), (el) => el.child(this.findBar("tree", t)))
       .when(Boolean(tree.offline), (el) => el.child(v_flex().flex_none().px(10).py(6).gap(4).border_b(1).border_color(t.border).text_size(11.5)
         .child(div().text_color(t.ansi3).child(tree.offline))
         .child(h_flex().gap(8).text_color(t.dim)
           .child(div().id("fp-retry-offline").cursor_pointer().text_color(t.accent).on_click((_e, cx) => this.reload(cx)).child("Retry"))
           .when(tree.loaded, (el) => el.child("showing the last loaded tree")))))
-      .when(rows.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().py(4)
+      .when(searching, (el) => el.child(this.findResults(t)))
+      .when(!searching && rows.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().py(4)
         .child(v_virtual_list("fp-tree", rows.length, ROW, (i) => rows[i].path,
           (range) => rows.slice(range.start, range.end).map((r) => this.row(r, t, focus)))
           .track_scroll(this.scroll).on_item_click((key, cx) => this.click(key, cx)).size_full())
         .child(Scrollbar.vertical("fp-tree").viewport_from_layout().absolute().inset_0())))
       .when(Boolean(empty), (el) => el.child(v_flex().p(10).gap(8).text_color(t.dim).child(empty)
         .when(Boolean(tree.error), (el) => el.child(div().id("fp-retry").cursor_pointer().text_color(t.accent).on_click((_e, cx) => this.reload(cx)).child("Retry")))))
-      .when(tree.limited, (el) => el.child(div().flex_none().px(10).py(4).border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
+      .when(tree.limited && !searching, (el) => el.child(div().flex_none().px(10).py(4).border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
         .child(`Limited to ${PER_FOLDER} entries per folder and ${TOTAL.toLocaleString("en-US")} in total`)));
+  }
+
+  /**
+   * A search field with its own key context: the bound Esc closes only the search, and the
+   * keys typed into it never reach the pane's shortcuts.
+   */
+  findBar(side, t) {
+    const st = side === "tree" ? this.ts : this.ds;
+    const close = (cx) => { if (side === "tree") this.closeTreeFind(cx); else { this.closeDocFind(); cx.notify(); } };
+    let info = null;
+    if (side === "doc" && st.query) {
+      const where = this.doc?.kind === "text" ? "line" : "block";
+      info = st.total ? `${matches(st.total)} in ${plural(st.hits.length, where)}` : "No matches";
+    }
+    return h_flex().id(`fp-find-${side}`).h(32).flex_none().w_full().pl(8).pr(4).gap(4).items_center().border_b(1).border_color(t.border).bg(t.chrome)
+      .key_context(FIND_CONTEXT).on_action(FIND_ESCAPE, (_e, cx) => close(cx))
+      .on_key_down((e, cx) => this.findKey(e, cx, side))
+      .child(h_flex().flex_1().min_w(0).h(24).px(6).gap(6).items_center().rounded(5).border_1().border_color(t.accent).bg(t.background)
+        .child(svg(ICON + "search.svg").size(12).flex_none().text_color(t.dim))
+        .child(Input.new(st.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
+      .when(Boolean(info), (el) => el.child(div().flex_none().px(4).text_size(11).text_color(st.total ? t.muted : t.ansi3).child(info)))
+      .when(side === "doc" && st.hits.length > 0, (el) => el
+        .child(this.textButton("fp-find-prev", "↑", t, (_e, cx) => { this.docStep(-1); cx.notify(); }))
+        .child(this.textButton("fp-find-next", "↓", t, (_e, cx) => { this.docStep(1); cx.notify(); })))
+      .child(this.button(`fp-find-${side}-close`, "close.svg", t, (_e, cx) => close(cx)));
+  }
+
+  /** The tree search's results: a flat list of paths, best first, in place of the tree. */
+  findResults(t) {
+    const ts = this.ts, f = this.ctx?.files, list = ts.results;
+    let foot;
+    if (!f?.data) foot = f?.error ? `Cannot list the files: ${f.error}` : "Listing files…";
+    else if (!list.length) foot = "No matching files";
+    else foot = (ts.total > list.length ? `Best ${list.length} of ${ts.total.toLocaleString("en-US")} matches` : matches(ts.total))
+      + ` · ${f.data.paths.length.toLocaleString("en-US")}${f.data.truncated ? "+" : ""} files`;
+    return v_flex().flex_1().min_h(0)
+      .when(list.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().py(4)
+        .child(v_virtual_list("fp-find-list", list.length, ROW, (i) => "find:" + list[i].path,
+          (range) => list.slice(range.start, range.end).map((r, k) => this.resultRow(r, range.start + k === ts.at, t)))
+          .track_scroll(this.findScroll).on_item_click((key, cx) => this.findClick(key.slice(5), cx)).size_full())
+        .child(Scrollbar.vertical("fp-find-list").viewport_from_layout().absolute().inset_0())))
+      .when(!list.length, (el) => el.child(div().flex_1()))
+      .child(div().flex_none().px(10).py(4).border_t(1).border_color(t.border).text_size(11)
+        .text_color(f?.error ? t.ansi3 : t.dim).child(foot));
+  }
+
+  /** A result: the name with its matched letters in the accent, then its folder, dimmed. */
+  resultRow(r, sel, t) {
+    const cut = r.path.lastIndexOf("/") + 1, name = r.path.slice(cut), dir = r.path.slice(0, Math.max(0, cut - 1));
+    const hit = new Set(r.hits), spans = [];
+    for (let i = 0; i < name.length;) {
+      const on = hit.has(cut + i);
+      let j = i + 1;
+      while (j < name.length && hit.has(cut + j) === on) j++;
+      const piece = div().flex_none().whitespace_nowrap().child(name.slice(i, j));
+      spans.push(on ? piece.text_color(t.accent).font_bold() : piece);
+      i = j;
+    }
+    const md = lang.isMarkdown(name), code = lang.forPath(name);
+    const g = this.git?.files.get(r.path), tint = g ? gitColor(g, t) : null;
+    return h_flex().h(ROW).w_full().pl(8).pr(8).gap(5).items_center().when(sel, (el) => el.bg(t.selected))
+      .child(svg(ICON + (md ? "file-md.svg" : code ? "file-code.svg" : "file.svg")).size(14).flex_none().text_color(md ? t.accent : t.dim))
+      .child(h_flex().flex_none().max_w("70%").overflow_hidden().text_color(r.path === this.file ? t.accent : tint ?? t.foreground).children(spans))
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(dir))
+      .when(Boolean(tint), (el) => el.child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(tint).child(g)));
   }
 
   message(t, text, sub) {
@@ -975,8 +1314,10 @@ export default class FilePreview extends View {
           .child(svg(ICON + (copied ? "check.svg" : "copy.svg")).size(13).text_color(copied ? t.done : t.muted))
           .when(copied, (el) => el.child(div().text_size(11).text_color(t.done).child("Copied")))))
       .child(div().w_full().h(text + 2 * pad).flex_none().py(pad)
-        .child(div().w_full().h(text).overflow_hidden()
-          .child(div().w_full().h(text + slack).flex_none().child(Editor.new(b.state).size_full()))));
+        .child(div().w_full().h(text).overflow_hidden().relative()
+          .child(div().w_full().h(text + slack).flex_none().child(Editor.new(b.state).size_full()))
+          // Rows with matches, when rows are lines (no soft wrap).
+          .when(Boolean(b.find) && !b.wrap, (e) => e.children(this.lineMarks(b.find.rows, lh, b.find.current, t)))));
   }
 
   /** The fences that show as code boxes, in document order (Mermaid sources only when shown). */
@@ -1023,7 +1364,7 @@ export default class FilePreview extends View {
   previewPane(t, narrow) {
     const doc = this.doc;
     let body;
-    if (!this.file) body = this.message(t, "Select a file", "↑ ↓ move · → ← open/close folder · Enter open · Tab tree/preview · b show/hide tree · + − 0 zoom · r reload" + (this.overlay ? " · Esc close" : ""));
+    if (!this.file) body = this.message(t, "Select a file", "↑ ↓ move · → ← open/close folder · Enter open · Tab tree/preview · b show/hide tree · / find · + − 0 zoom · r reload" + (this.overlay ? " · Esc close" : ""));
     else if (!doc) body = this.message(t, "Loading…");
     else if (doc.kind === "markdown")
       body = v_flex().id(`doc:${this.file}`).flex_1().min_h(0).overflow_y_scrollbar()
@@ -1037,6 +1378,8 @@ export default class FilePreview extends View {
     else body = this.message(t, doc.message ?? "Cannot preview this file");
     return v_flex().id("fp-preview-pane").flex_1().min_w(0).h_full().min_h(0).bg(t.surface)
       .track_focus(this.previewFocus).on_key_down((e, cx) => this.onKey(e, cx, "preview"))
+      .key_context(DOC_CONTEXT).on_action(FIND_OPEN, (_e, cx) => this.openDocFind(cx))
+      .when(Boolean(this.ds), (el) => el.child(this.findBar("doc", t)))
       .child(body);
   }
 
@@ -1049,7 +1392,10 @@ export default class FilePreview extends View {
     return v_flex().w_full().flex_none().relative().child(el)
       .when(Boolean(m?.bar), (e) => e.child(div().absolute().top(0).bottom(0).left(-BAR_X).w(3).rounded(1).bg(barColor(m.bar, t))))
       .when(Boolean(m?.top), (e) => e.child(svg(ICON + "deleted.svg").size(7).absolute().top(-4).left(-BAR_X - 1).text_color(t.ansi1)))
-      .when(Boolean(m?.bottom), (e) => e.child(svg(ICON + "deleted.svg").size(7).absolute().bottom(-4).left(-BAR_X - 1).text_color(t.ansi1)));
+      .when(Boolean(m?.bottom), (e) => e.child(svg(ICON + "deleted.svg").size(7).absolute().bottom(-4).left(-BAR_X - 1).text_color(t.ansi1)))
+      // Search: a bar in the right padding; the current block also gets a frame.
+      .when(Boolean(b.find), (e) => e.child(div().absolute().top(0).bottom(0).right(b.find.current ? -BAR_X - 1 : -BAR_X).w(b.find.current ? 5 : 3).rounded(2).bg(t.accent)))
+      .when(Boolean(b.find?.current), (e) => e.child(div().absolute().top(-4).bottom(-4).left(-4).right(-4).rounded(6).border_1().border_color(t.accent)));
   }
 
   /** How the code view lays out: "full" (line gutter, outer scroll) or "plain" (the Editor scrolls; ruler). */
@@ -1065,19 +1411,24 @@ export default class FilePreview extends View {
    * changes go on an overview ruler at the right edge.
    */
   codeView(t) {
-    const editor = Editor.new(this.code).size_full(), m = this.codeMarks;
+    const editor = Editor.new(this.code).size_full(), m = this.codeMarks, ds = this.ds;
+    const hits = ds?.hits.length ? ds.hits : null, cur = hits ? hits[ds.at].line : 0;
     if (this.codeLayout() === "plain") {
       const box = div().flex_1().min_w(0).h_full().child(editor);
-      if (!this.git) return div().flex_1().min_h(0).size_full().child(box);
+      if (!this.git && !hits) return div().flex_1().min_h(0).size_full().child(box);
       // Rows [from, from + n) as a share of the strip; the lower half hangs from the bottom so a
       // 2 px minimum never pokes out of the strip.
       const rows = Math.max(1, this.doc.lines), pct = (n) => `${(100 * n) / rows}%`;
       const at = (el, from, n) => (2 * from + n <= rows ? el.top(pct(from)) : el.bottom(pct(rows - from - n)));
       return h_flex().flex_1().min_h(0).size_full().child(box)
-        .child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
+        .when(Boolean(this.git), (el) => el.child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
           .when(Boolean(m), (e) => e
             .children(m.runs.map((r) => at(div().absolute().left(2).w(RULER - 4).h(pct(r.n)).min_h(2).bg(barColor(r.kind, t)), r.from - 1, r.n)))
-            .children(m.dels.map((n) => at(div().absolute().left(1).w(RULER - 2).h(2).bg(t.ansi1), n, 0)))));
+            .children(m.dels.map((n) => at(div().absolute().left(1).w(RULER - 2).h(2).bg(t.ansi1), n, 0))))))
+        // Search: a strip of its own, so its marks never cover the git ones.
+        .when(Boolean(hits), (el) => el.child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
+          .children(hits.map((h) => at(div().absolute().left(h.line === cur ? 0 : 2).w(h.line === cur ? RULER : RULER - 4).h(pct(1))
+            .min_h(h.line === cur ? 4 : 2).bg(h.line === cur ? t.foreground : t.accent), h.line - 1, 1)))));
     }
     const lh = lineHeight(this.codeFont), text = this.doc.lines * lh, slack = Math.max(text, 3 * lh);
     return div().id(`code:${this.file}`).flex_1().min_h(0).size_full().overflow_y_scrollbar()
@@ -1086,8 +1437,24 @@ export default class FilePreview extends View {
           .when(Boolean(m), (e) => e
             .children(m.runs.map((r) => div().absolute().left(3).w(3).top((r.from - 1) * lh).h(r.n * lh).bg(barColor(r.kind, t))))
             .children(m.dels.map((n) => svg(ICON + "deleted.svg").size(7).absolute().left(1).top(Math.max(0, Math.min(text - 7, n * lh - 3.5))).text_color(t.ansi1)))))
-        .child(div().flex_1().min_w(0).h(text).overflow_hidden()
-          .child(div().w_full().h(text + slack).flex_none().child(editor))));
+        .child(div().flex_1().min_w(0).h(text).overflow_hidden().relative()
+          .child(div().w_full().h(text + slack).flex_none().child(editor))
+          .when(Boolean(hits), (e) => e.children(this.lineMarks(hits.map((h) => h.line - 1), lh, false, t, cur - 1)))));
+  }
+
+  /**
+   * Rows (from 0) with matches, aligned on the text: a tint across the row and a bar at the
+   * right edge. `current` marks them all as the current block; `at`, one row.
+   */
+  lineMarks(rows, lh, current, t, at = -1) {
+    const soft = tint(t.accent, "22"), strong = tint(t.accent, "44");
+    return rows.flatMap((r) => {
+      const on = current || r === at, out = [];
+      const bg = on ? strong : soft;
+      if (bg) out.push(div().absolute().left(0).right(0).top(r * lh).h(lh).bg(bg));
+      out.push(div().absolute().right(0).w(on ? 4 : 2).top(r * lh).h(lh).bg(t.accent));
+      return out;
+    });
   }
 
   statusBar(t) {
@@ -1100,6 +1467,8 @@ export default class FilePreview extends View {
       const m = this.blocks.filter((b) => b.kind === "mmd"), busy = m.filter((b) => b.d?.pending).length;
       if (m.length) parts.push(busy ? `Rendering ${plural(busy, "diagram")}…` : plural(m.length, "diagram"));
     }
+    const where = this.docWhere();
+    if (where) parts.push(`Find: ${where}`);
     if (this.note) parts.push(this.note);
     if (this.file && this.loadedAt && doc && doc.kind !== "missing") parts.push(ago(this.loadedAt));
     if (this.ctx?.polling) parts.push("polling (folder too big to watch)");

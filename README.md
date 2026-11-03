@@ -67,6 +67,29 @@ as a panel docked to the right of the terminal.
   Deleted files aren't in the tree, so they get no mark; ignored files are left alone.
   Outside a repository, or without git, nothing is drawn. The marks refresh with live
   reload and every 5 s while the mod is open.
+- **Find a file**: `/` or `cmd-f` in the tree (or the magnifier next to the sidebar
+  button) opens a search field over the tree. It fuzzy-matches the whole relative path,
+  ignoring case (`samjs` finds `sample.js`). Letters in the file name, runs of adjacent
+  letters and word starts rank higher. Up to 200 results replace the tree, best first,
+  with the matched letters highlighted and git letters shown. `↑` `↓` move, `Enter` opens
+  the file (the field keeps the keyboard), and `Esc` closes the search and reveals the
+  opened file in the tree. Inside a git repository the list is
+  `git ls-files --cached --others --exclude-standard` (ignored files are left out);
+  elsewhere it is `find` (skips `.git`, 12 levels deep, at most 20,000 files). It works on
+  remote spaces, is listed once per root and refreshes when the tree changes.
+- **Find in the document**: `/` or `cmd-f` in the preview (or the document magnifier in
+  the top bar) opens a find bar with a match count ("6 matches in 3 blocks") and previous /
+  next buttons. Matching is a case-insensitive substring over the file's source (prose,
+  fences and Mermaid sources). **It marks matches but can't scroll to them** (see
+  Limitations), so it tells you where the current one is, in the status bar:
+  `Find: block 2 of 3 · line 82 · <section heading>`.
+  - Markdown: a bar in the right margin of each block with matches; the current block is
+    framed. Lines with matches inside a code fence are tinted.
+  - Code files: matching lines are tinted in the line-aligned layout (repository files up
+    to 1,000 lines); otherwise each match is a mark on an overview strip at the right edge.
+  - `Enter` / `↓` / `n` go to the next block (or line), `shift-Enter` / `↑` / `shift-n`
+    to the previous one, `Esc` closes the bar. The search survives live reload and is
+    cleared when you open another file.
 - **Live reload**: the open file and the expanded folders update as files change. Local
   spaces use a file watcher. Remote spaces poll: every 2.5 s for the open file and every
   10 s for the tree.
@@ -156,10 +179,21 @@ Inside the mod:
 | `Enter` / `Space` | Open the file, or toggle the folder |
 | `Tab` | Switch focus between the tree and the preview |
 | `r` | Reload the tree and the file |
+| `/` or `cmd-f` | Find a file (tree focused) or find in the document (preview focused) |
+| `n` / `shift-n` | Next / previous match block while the document search is open (preview focused) |
 | `b` | Hide or show the file tree (remembered separately for the popup and the panel) |
 | `+` (or `=`) / `-` | Reading zoom in / out (70 % to 200 %; remembered separately for the popup and the panel) |
 | `0` | Reading zoom back to 100 % |
 | `Esc` | Close the popup |
+
+In a search field (keys typed there never trigger the shortcuts above):
+
+| Key | Action |
+|---|---|
+| `↑` `↓` (`PageUp` `PageDown`) | File search: move in the results. Document search: previous / next match |
+| `Enter` | File search: open the selected file. Document search: next match |
+| `shift-Enter` | Document search: previous match |
+| `Esc` | Close the search only (the popup stays open) |
 
 In an expanded diagram:
 
@@ -169,7 +203,7 @@ In an expanded diagram:
 | `0` | Back to fit |
 | `Esc` | Close the expanded diagram (the popup stays open) |
 
-The top bar also has buttons for the tree, reading zoom (A−, the percentage, A+),
+The top bar also has buttons for the tree, file search, document search, reading zoom (A−, the percentage, A+),
 reload, anchor (popup only: dock as a panel)
 and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 
@@ -190,6 +224,13 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
   image is upscaled a little.
 - Above 100 % reading zoom, diagrams in the document are the cached `-s 2` image scaled
   up, so they are a little soft; the expanded view renders a sharper copy.
+- **Document search marks matches but doesn't scroll to them.** Herdr can only scroll
+  virtual lists from a script, not the document, so the find bar and status bar tell you
+  the block, line and section of the current match instead. Words aren't highlighted
+  inside text: Herdr's text views and editors expose no highlight or selection API, so
+  the marks are per block (Markdown) or per line (code). A long prose run between two
+  fences is one block, so its frame can be tall.
+- File search lists at most 50,000 files in a git repository and 20,000 elsewhere.
 - Leaving an expanded diagram in the popup puts the document back at its top: Herdr
   can't read or restore a scroll position.
 - macOS and Linux only; remote spaces must be Unix. **Windows is not supported.**
@@ -227,7 +268,7 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 ## Repository layout
 
 ```
-mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, git.js, mermaid.js, zoom.js, dock.js, icons/)
+mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, git.js, find.js, mermaid.js, zoom.js, dock.js, icons/)
 mods/file-preview-panel/   launcher for the right panel (main.js, dock.js copy)
 scripts/sync.sh            install / update into ~/.config/herdr-app/mods/
 scripts/make-big-md.sh     generates docs/fixtures/big.md (> 1 MB, not versioned)

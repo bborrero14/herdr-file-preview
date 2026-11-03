@@ -53,11 +53,12 @@ mods/file-preview/
   markdown.js   segment(text) → [{md}, {code, lang}, {mermaid}, …] (fence scanner)
   lang.js       extension / fence info → Editor language id, label, wraps(), wrappedRows()
   git.js        read-only git: status → tree letters and folder tints; diff -U0 HEAD → changed lines
+  find.js       file list (git ls-files or find) + fuzzy ranking; document matches, headings; key contexts
   mermaid.js    mmdc + browser lookup, one-at-a-time render queue, .cache/, IHDR size, sizes.json, prune
   zoom.js       Zoom: the expanded diagram (fit, zoom steps, viewport, -s 4 swap) and its keys
   dock.js       anchor terminal, pane.split + 45 % sizing, panel toggle
   icons/*.svg   own icons (folder, folder-open, file, file-md, file-code, chevrons, reload, anchor, close,
-                sidebar, expand, zoom-in, zoom-out, fit, deleted)
+                sidebar, expand, zoom-in, zoom-out, fit, deleted, search, search-doc)
 mods/file-preview-panel/
   mod.json      { place: none, overlay: { kind: popup, width: 1, height: 1, frame: none } }
   main.js       Launcher View: init() { try { toggle() } finally { if (overlay) closeOverlay(overlay) } }
@@ -95,6 +96,7 @@ Tree keys:
 | Tab | Switch focus between tree and preview |
 | `r` | Reload |
 | `b` | Hide or show the tree (any width) |
+| `/`, `cmd-f` | Open the file search (tree) or the document search (preview) |
 | Esc | Close the popup |
 
 Ignore keys that carry platform, control or alt modifiers.
@@ -103,7 +105,10 @@ Ignore keys that carry platform, control or alt modifiers.
 `reload`, `anchor`, `retry-diagrams`, `open:<path>` (relative to the root, or
 absolute), `expand:<n>` (n-th diagram, from 0), `zoom-in`, `zoom-out`, `zoom-fit`,
 `zoom-close`, `text-in`, `text-out`, `text-reset` (reading zoom), `copy:<n>` (the n-th code box's copy button, from 0; check with
-`pbpaste`), and `tree-reset` (forget this mode's stored tree choice). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
+`pbpaste`), `tree-reset` (forget this mode's stored tree choice), and the search hooks: `tree-find:<q>`,
+`doc-find:<q>`, `find:<q>` (the pane with the keyboard), `find-next`, `find-prev`,
+`find-enter` (open the selected result), `find-close` and `find-esc` (dispatches the Esc
+action down the focus path, as the bound key would). These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
 with no keyboard or pointer automation.
 
 ## Platform gotchas (all learned the hard way)
@@ -391,6 +396,57 @@ with no keyboard or pointer automation.
   Markers in the lower half hang from `bottom(%)`, so the 2 px minimum never overflows
   the strip (a marker at the last row was invisible with `top`).
 
+### Search
+
+- **Scope.** The document's scroll can't be set from script (only virtual lists scroll),
+  so document search **marks and counts** matches and reports where the current one is
+  (block or line number, line, section heading). It doesn't scroll.
+- **No text highlighting.** `EditorState` exposes only `value`, `set_value`, `on` and
+  `release`: no selection, range or find API. `TextView` has none either. `InputState`
+  has `set_selected_range`, but that's the search field itself. Mark blocks and rows
+  instead:
+  - Markdown block: a 3 px `t.accent` bar at `right(-8)` in the column's right padding
+    (git bars sit at `left(-8)`, so they never collide). The current block gets a 5 px bar
+    and a 1 px accent frame at `inset(-4)`.
+  - Non-wrapped fence and the full-height code view: rows are lines, so draw an absolute
+    tint (`accent` + alpha `22`, current `44`) at `top(row × lineHeight(font))` over the
+    Editor, with a bar at the right edge. Plain divs without handlers don't take the
+    pointer, so selection still works.
+  - Plain code layout (no repo, > 1000 lines, soft-wrapped): an 8 px strip of its own next
+    to the git ruler, with proportional marks; the current one is wider, in `t.foreground`.
+- **Esc and cmd-f.** Bind once in `init`:
+  `cx.bind_keys([{keystroke:"escape", action, context:"FilePreviewFind"}, {keystroke:"cmd-f", action:open, context:"FilePreviewTree"}, {… "FilePreviewDoc"}])`.
+  Put `.key_context("FilePreviewFind").on_action(escape, …)` on the find bar that wraps the
+  `Input`, and `.key_context("FilePreviewTree"|"FilePreviewDoc").on_action(open, …)` on the
+  panes. A context binding beats the app's Esc, which would close the popup.
+  `window.dispatch_action(name)` reaches the same handler; the herdr `window()` import
+  shadows the global, so use `globalThis.window`.
+- **Typed keys bubble.** Key events from the `Input` go on up to the pane's `on_key_down`,
+  so `b`, `r`, `+`, `-`, `0` and `/` would fire while you type. The find bar's own
+  `on_key_down` handles `↑` `↓` (and stops propagation), and for any other key it sets a
+  flag that the pane handler checks and clears. Don't stop propagation for printable keys,
+  or they may never reach the field. Enter comes through `input.on("submit")`, whose event
+  carries `shift`.
+- **`InputState`** is created when the search opens (a handler or command, never
+  `render`) and released when it closes or the root changes. `set_value` is followed by
+  running the query directly (don't rely on a `change` event).
+- **File list:** one `sh -c` per root, here or remote. If `git rev-parse
+  --is-inside-work-tree` prints `true`, run `git --no-optional-locks -c core.fsmonitor=false
+  -c core.quotepath=off ls-files --cached --others --exclude-standard -z | head -c 4000000`
+  (paths come relative to the root). Otherwise run `find . -maxdepth 12 -name .git -prune -o
+  \( -type f -o -type l \) -print | head -n 20000`. A first `git\0`/`find\0` field says
+  which. Cache it on the context (single-flight). Mark it stale when a tree refresh
+  completes; an open search re-lists at most every 5 s.
+- **Fuzzy ranking:** for each path, try contiguous substrings (last anywhere, first in
+  the basename), subsequences starting at each of the first 8 occurrences of the first
+  letter in the basename (earliest and latest alignment of the rest), and a tightened
+  subsequence. Score each one: +1 per letter, +4 when adjacent to the previous one, +3 at
+  a word start (`/ - _ .`), +2 inside the basename, +4 when it starts the basename, +2 when
+  it reaches the end (the extension). Subtract 0.05 × span and 0.02 × length. A query
+  that extends the last one only searches the last matches. Show the top 200 in a second
+  virtual list (its own scroll handle), with the name built from per-run `div`s (accent +
+  bold on matched letters) and the folder dimmed and truncated.
+
 ### Live reload
 
 - **`watchFolder(dir)` works only locally.**
@@ -438,7 +494,7 @@ with no keyboard or pointer automation.
   Mermaid, a table and task lists
 - `mermaid.md`: flowchart, sequence, class, a broken diagram and identical twins
 - `tables.md`
-- `sample.{js,sh,py,c,go,json,yaml}`
+- `sample.{js,sh,py,c,go,json,yaml}` (search: `samjs` → `sample.js`, `return` in `sample.py`)
 - `sample.min.json`: about 5 KB on one line
 - `big.md`: over 1 MB, generated by `scripts/make-big-md.sh` (not versioned)
 - `tiny.png`: binary
