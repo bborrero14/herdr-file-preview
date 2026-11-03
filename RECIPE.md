@@ -18,6 +18,8 @@ what the docs leave out, all verified on a real build.
     soft-wrapped.
   - Plain text for anything else.
 - **Live reload**, in local and remote spaces.
+- **Git change marks** (VS Code style): status letters and colors in the tree, changed
+  blocks in Markdown, a line gutter (or an overview ruler) in the code view.
 - **Hide/show the tree** at any width (top-bar button, key `b`), remembered per mode.
 - **Reading zoom** (70–200 %): prose, fences, code view and diagrams scale together;
   keys `+`/`=`, `-`, `0`, top-bar buttons A− / % / A+, remembered per mode.
@@ -50,11 +52,12 @@ mods/file-preview/
   source.js     read + binary check (NUL) + 1 MB truncation + stat stamp for polling
   markdown.js   segment(text) → [{md}, {code, lang}, {mermaid}, …] (fence scanner)
   lang.js       extension / fence info → Editor language id, label, wraps(), wrappedRows()
+  git.js        read-only git: status → tree letters and folder tints; diff -U0 HEAD → changed lines
   mermaid.js    mmdc + browser lookup, one-at-a-time render queue, .cache/, IHDR size, sizes.json, prune
   zoom.js       Zoom: the expanded diagram (fit, zoom steps, viewport, -s 4 swap) and its keys
   dock.js       anchor terminal, pane.split + 45 % sizing, panel toggle
   icons/*.svg   own icons (folder, folder-open, file, file-md, file-code, chevrons, reload, anchor, close,
-                sidebar, expand, zoom-in, zoom-out, fit)
+                sidebar, expand, zoom-in, zoom-out, fit, deleted)
 mods/file-preview-panel/
   mod.json      { place: none, overlay: { kind: popup, width: 1, height: 1, frame: none } }
   main.js       Launcher View: init() { try { toggle() } finally { if (overlay) closeOverlay(overlay) } }
@@ -326,6 +329,67 @@ with no keyboard or pointer automation.
   never mix.
 - Persist per mode like the tree: `setShared("file-preview.zoom.<popup|panel>", z)` (`null`
   at 100 %), read once in `init`. The diagram-mode copy ignores it.
+
+### Git change marks
+
+- **One `sh -c` script per question**, run with `exec(…, { on })`, so a remote space costs
+  one round trip. `command -v git` first (exit 4: no git), then everything through
+  `git -C "$root"` with
+  `--no-optional-locks -c core.fsmonitor=false -c core.quotepath=off -c diff.autoRefreshIndex=false`.
+  **Without those flags `git status` refreshes `.git/index`**: the folder watch sees the
+  write and starts the next refresh, forever. Verified: `.git/index` keeps its mtime
+  while the 5 s poll runs.
+- **Tree:** `git rev-parse --show-prefix`, a NUL, then
+  `git status --porcelain=v1 -z --untracked-files=all`. Porcelain paths are relative to
+  the repo top; strip the prefix to get root-relative paths. Use the prefix, **not**
+  `--show-toplevel` string math: on macOS `/tmp` is `/private/tmp`, so the root and the
+  top don't share a string prefix. Not a work tree (exit 5) → no decorations.
+  - XY → letter: `??` U; any `U`, or `AA`/`DD` → `!`; any `D` → skip (not on disk);
+    `A`/`R`/`C` in X → A; else M. With `-z`, a rename or copy is followed by the old
+    path as its own field: skip it.
+  - Folders: walk each changed path's parents and keep the strongest letter
+    (`!` > M > A/U), stopping once a parent already ranks as high.
+  - Cap the entries (20,000) for a huge untracked folder.
+- **Document:** `git status --porcelain -z -- <file>`, `\1`, `H` or `N`
+  (`rev-parse -q --verify HEAD`), `\1`, then `git diff --no-color --no-ext-diff
+  --no-textconv -U0 HEAD -- <file>` (staged and unstaged at once). Untracked, or no
+  HEAD yet → every line added. A staged rename limited to the new path diffs as a new
+  file, which is what the tree shows (A). Hunks `@@ -a,b +c,d @@` (a missing count is
+  1): `d = 0` → deletion after line `c`; `b = 0` → `c…c+d−1` added; else modified.
+  `-U0` folds a deletion next to a change into one modified hunk.
+- **Refresh:** status on start, after every tree refresh (watch events, remote polls),
+  on watch batches that touch only `.git` (a stage or commit), and every 5 s
+  (`cx.timer.every` in the context's tasks). Single-flight per context: a request while
+  one runs sets a flag and runs once after. An unreachable machine keeps the last
+  marks. Re-run the file's diff only when its status letter changes or its content
+  reloads; an untracked file needs no exec at all.
+- **Markdown:** `segment()` returns `start`/`end` (source lines from 1, inclusive) for
+  each prose chunk (`chunks()` reports each piece's first line) and fence (with its
+  fence lines). Wrap every block in `v_flex().w_full().relative()` and draw the marks
+  **absolutely in the column's side padding** (`left(-8)`, 3 px wide, `top(0).bottom(0)`):
+  no layout change with or without a repo. Bar color: added `ansi2`, modified or mixed
+  `ansi4`. A deletion after line n goes to the first block ending at or below n: its
+  bottom when n is its last line, else its top; past the last block, the last block's
+  bottom. Deleted-lines marker: a filled triangle SVG (`currentColor`) in `ansi1`.
+- **Code view, line gutter (≤ 1,000 rows):** the Editor scrolls itself and its scroll
+  position can't be read, so a sibling gutter can't follow it. Lay it out at full height
+  instead (the fence trick): a box of `rows × round(f × 1.618)` with `overflow_hidden()`,
+  the Editor inside at `text + max(text, 3 rows)`, all inside an `overflow_y_scrollbar()`
+  container next to an 8 px gutter of absolute bars (`top = (line − 1) × lh`). The Editor's
+  text starts flush at its top, so marks align at every zoom (checked at 100, 150 and
+  200 %). Rows = `\n` count + 1 (a trailing newline shows an empty last row).
+  - **Cost:** the Editor lays out every row each frame at full height. Measured as the
+    gap between `cx.timer.every(1)` ticks that each `cx.notify()` (8 ms idle at 120 Hz):
+    300 rows 8.7 ms, 1,000 rows 16 ms, 2,000 rows 46 ms, 8,000 rows 650 ms. The normal,
+    self-scrolling Editor stays at 8 ms for 8,000 rows. Hence the 1,000-row cap.
+  - Costs of the full-height layout: the Editor's horizontal scrollbar is in the clipped
+    part (trackpad still scrolls sideways), and keyboard cursor moves don't scroll the
+    outer container. So it is used only inside a repo; elsewhere the code view is the
+    plain Editor, as before.
+- **Code view, overview ruler (> 1,000 rows, or soft-wrapped JSON):** an 8 px strip right
+  of the Editor with markers at `top: (line − 1) / rows %` and `h: n / rows %`, `min_h(2)`.
+  Markers in the lower half hang from `bottom(%)`, so the 2 px minimum never overflows
+  the strip (a marker at the last row was invisible with `top`).
 
 ### Live reload
 

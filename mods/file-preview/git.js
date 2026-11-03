@@ -1,0 +1,126 @@
+// Git decorations, read-only: file status for the tree and changed lines for the document.
+import { exec } from "herdr";
+
+// Reads that write nothing under .git (no index refresh, lock or fsmonitor cookie): the folder
+// watch would see the write and start the next refresh. quotepath=off keeps UTF-8 names raw.
+const GIT = 'g() { git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=off -c diff.autoRefreshIndex=false -C "$r" "$@"; }';
+
+// $1 root (git -C, so a remote root works the same). Prints "<prefix of the root in its repo>\0" then the porcelain status.
+// Exit 4: no git; 5: not a work tree.
+const STATUS = GIT + '; r=$1; command -v git >/dev/null 2>&1 || exit 4; p=$(g rev-parse --show-prefix 2>/dev/null) || exit 5; printf "%s\\0" "$p"; g status --porcelain=v1 -z --untracked-files=all';
+
+// $1 root, $2 file relative to it. Prints the file's status, \1, H or N (HEAD or none), \1, the diff.
+const DIFF = GIT + '; r=$1; f=$2; command -v git >/dev/null 2>&1 || exit 4; g rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 5; g status --porcelain=v1 -z --untracked-files=all -- "$f" || exit 5; printf "\\001"; if g rev-parse -q --verify HEAD >/dev/null; then printf "H\\001"; g diff --no-color --no-ext-diff --no-textconv -U0 HEAD -- "$f"; else printf "N\\001"; fi';
+
+const MAX_ENTRIES = 20000;
+
+/** Tree letter of a porcelain XY, or null (deleted: not in the tree). */
+function letter(xy) {
+  if (xy === "??") return "U";
+  if (xy.includes("U") || xy === "AA" || xy === "DD") return "!";
+  if (xy.includes("D")) return null;
+  if (/[ARC]/.test(xy[0])) return "A";
+  return "M";
+}
+
+// Folder tint: the most important change below it.
+const RANK = { "!": 3, M: 2, A: 1, U: 1 };
+
+/**
+ * -> null (not a repo, no git) | undefined (machine unreachable: keep what is shown)
+ *  | { files: Map<rel, letter>, folders: Map<rel, letter> }, paths relative to `root`, only under it.
+ */
+export async function status(root, on) {
+  const r = await exec("sh", ["-c", STATUS, "fp", root], { on }).catch(() => undefined);
+  if (!r) return undefined;
+  if (r.code !== 0) return null;
+  const f = r.stdout.split("\0"), prefix = f[0], files = new Map(), folders = new Map();
+  for (let i = 1, n = 0; i < f.length && n < MAX_ENTRIES; i++, n++) {
+    const e = f[i];
+    if (e.length < 4) continue;
+    const xy = e.slice(0, 2), path = e.slice(3);
+    if (/[RC]/.test(xy)) i++;              // the old path follows a rename or copy
+    const l = letter(xy);
+    if (!l || !path.startsWith(prefix)) continue;
+    const rel = path.slice(prefix.length);
+    if (!rel || rel.endsWith("/")) continue;
+    files.set(rel, l);
+    for (let k = rel.lastIndexOf("/"); k > 0; k = rel.lastIndexOf("/", k - 1)) {
+      const dir = rel.slice(0, k), was = folders.get(dir);
+      if (was && RANK[was] >= RANK[l]) break;   // its parents already rank as high
+      folders.set(dir, l);
+    }
+  }
+  return { files, folders };
+}
+
+const lineCount = (text) => (text ? text.split("\n").length - Number(text.endsWith("\n")) : 0);
+
+/**
+ * Changed lines of one file against HEAD (staged and unstaged).
+ * -> null (not in a repo, clean, ignored) | undefined (unreachable) | { lines: Map<line, "a" | "m">, dels: Set<n> }
+ * Lines from 1; a deletion n sits after line n (0: above the first).
+ */
+export async function changes(root, rel, text, on) {
+  const r = await exec("sh", ["-c", DIFF, "fp", root, rel], { on }).catch(() => undefined);
+  if (!r) return undefined;
+  if (r.code !== 0) return null;
+  const [st, head, diff = ""] = splitOnce(r.stdout);
+  const xy = st.slice(0, 2);
+  if (!xy || xy === "!!") return null;
+  const lines = new Map(), dels = new Set();
+  // Untracked, or nothing committed yet: every line is new.
+  if (xy === "??" || head !== "H") return added(text);
+  for (const h of diff.matchAll(/^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)) {
+    const old = h[1] === undefined ? 1 : Number(h[1]), at = Number(h[2]), n = h[3] === undefined ? 1 : Number(h[3]);
+    if (n === 0) { dels.add(at); continue; }
+    for (let i = at; i < at + n; i++) lines.set(i, old === 0 ? "a" : "m");
+  }
+  return lines.size || dels.size ? { lines, dels } : null;
+}
+
+/** Every line of `text` added (an untracked file). */
+export function added(text) {
+  const lines = new Map();
+  for (let i = 1, n = lineCount(text); i <= n; i++) lines.set(i, "a");
+  return { lines, dels: new Set() };
+}
+
+/** Same files and folders, so nothing to redraw. */
+export function same(a, b) {
+  if (!a || !b) return a === b;
+  if (a.files.size !== b.files.size || a.folders.size !== b.folders.size) return false;
+  for (const [k, v] of a.files) if (b.files.get(k) !== v) return false;
+  for (const [k, v] of a.folders) if (b.folders.get(k) !== v) return false;
+  return true;
+}
+
+/** Runs of equal changed lines: [{ from, n, kind }], in order. */
+export function runs(marks) {
+  const out = [];
+  for (const i of [...marks.lines.keys()].sort((a, b) => a - b)) {
+    const k = marks.lines.get(i), last = out[out.length - 1];
+    if (last && last.kind === k && last.from + last.n === i) last.n++;
+    else out.push({ from: i, n: 1, kind: k });
+  }
+  return out;
+}
+
+function splitOnce(s) {
+  const a = s.indexOf("\x01"), b = a < 0 ? -1 : s.indexOf("\x01", a + 1);
+  if (a < 0) return [s, "", ""];
+  if (b < 0) return [s.slice(0, a), s.slice(a + 1), ""];
+  return [s.slice(0, a), s.slice(a + 1, b), s.slice(b + 1)];
+}
+
+/** Changed lines (1-based) of [start, end] as a bar kind: "a" | "m" | null; mixed is "m". */
+export function rangeKind(marks, start, end) {
+  if (!marks) return null;
+  let kind = null;
+  for (let i = start; i <= end; i++) {
+    const k = marks.lines.get(i);
+    if (k === "m") return "m";
+    if (k) kind = "a";
+  }
+  return kind;
+}

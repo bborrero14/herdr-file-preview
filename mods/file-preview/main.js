@@ -11,6 +11,7 @@ import * as lang from "./lang.js";
 import { Mermaid, fnv1a, cacheKey, themeOf } from "./mermaid.js";
 import { dock, panelOf, size } from "./dock.js";
 import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
+import * as git from "./git.js";
 
 const ICON = "mods/file-preview/icons/";
 const ROW = 22;              // tree row height
@@ -34,6 +35,12 @@ const TREE_KEY = "file-preview.tree.";   // + "popup" | "panel": the last explic
 // Reading zoom of the document (prose, fences, code view, diagrams); never the bars or the tree.
 const LEVELS = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const ZOOM_KEY = "file-preview.zoom.";   // + "popup" | "panel": the level, persisted (null at 100 %)
+// Git decorations: status poll, the code view's line gutter and the long file's overview ruler.
+const POLL_GIT = 5000;
+// A full-height Editor lays out every row each frame: ~16 ms at 1000 rows, 45 ms at 2000.
+const FULL_MAX = 1000;       // code files up to this many rows get a line gutter; longer ones, the ruler
+const GUTTER = 8, RULER = 8;
+const BAR_X = 8;             // a Markdown block's bar sits this far left of the column
 
 /** Reading zoom action of an unmodified key: "in" | "out" | "reset" | null. */
 function textKey(e) {
@@ -85,6 +92,17 @@ function ago(at) {
 
 const tilde = (p) => { const h = home(); return p && (p === h || p.startsWith(h + "/")) ? "~" + p.slice(h.length) : p ?? ""; };
 const plural = (n, w) => `${n.toLocaleString("en-US")} ${w}${n === 1 ? "" : "s"}`;
+
+/** Rows of an Editor holding `text` (a trailing newline leaves an empty last row). */
+function rowCount(text) {
+  let n = 1;
+  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) n++;
+  return n;
+}
+
+/** Color of a git letter: conflict red, modified yellow, added or untracked green. */
+const gitColor = (g, t) => (g === "!" ? t.ansi1 : g === "M" ? t.ansi3 : t.ansi2);
+const barColor = (kind, t) => (kind === "a" ? t.ansi2 : t.ansi4);
 
 function syntax() {
   const t = theme();
@@ -181,11 +199,14 @@ export default class FilePreview extends View {
     const cwd = ctx.cwd || (ctx.on ? "" : home());
     this.ctx = { cwd, on: ctx.on ?? null, key, tasks: [], dirty: new Set(), all: false };
     this.tree = new Tree(cwd, this.ctx.on);
+    this.git = null;        // { files, folders } of the root's repo; null outside one
     this.cursor = null;
     this.show(null);
+    const c = this.ctx;
+    c.tasks.push(cx.timer.every(POLL_GIT, (cx) => this.gitRefresh(c, cx)));
     if (cwd) { this.refreshTree(this.ctx, null, cx, true); return; }
     // A remote space without a folder: its home, asked once.
-    const c = this.ctx, tree = this.tree;
+    const tree = this.tree;
     this.loadingTree = true;
     cx.spawn(async (cx) => {
       const r = await exec("sh", ["-c", 'printf %s "$HOME"'], { on: c.on }).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
@@ -249,6 +270,7 @@ export default class FilePreview extends View {
       if (this.cursor === null || !rows.some((r) => r.path === this.cursor)) this.cursor = rows[0]?.path ?? null;
       // Remote: poll even when the first listing failed, so an offline machine recovers by itself.
       if ((tree.loaded || ctx.on) && !ctx.watching) this.watch(ctx, cx);
+      this.gitRefresh(ctx, cx);
       cx.notify();
       const q = ctx.queued;
       ctx.queued = undefined;
@@ -315,7 +337,73 @@ export default class FilePreview extends View {
       if (file && (rel === file || rel === parent(file))) reread = true;   // some watchers report the folder
     }
     if (all || folders.size) this.refreshTree(ctx, all ? null : folders, cx);
+    else this.gitRefresh(ctx, cx);   // e.g. only .git moved: a commit or a stage
     if (reread && file) this.show(file, cx, { quiet: true });
+  }
+
+  // ---- git decorations ----------------------------------------------------
+
+  /** Status of the root's repo; one run at a time per context, a request meanwhile runs once after. */
+  gitRefresh(ctx, cx) {
+    if (this.ctx !== ctx || !this.tree.root || this.closed) return;
+    if (ctx.gitBusy) { ctx.gitAgain = true; return; }
+    ctx.gitBusy = true;
+    const root = this.tree.root;
+    cx.spawn(async (cx) => {
+      let s;
+      try { s = await git.status(root, ctx.on); }
+      finally { ctx.gitBusy = false; }
+      if (this.ctx !== ctx) return;
+      if (s !== undefined && !git.same(this.git, s)) {
+        const file = this.file, before = file ? this.git?.files.get(file) : undefined;
+        this.git = s;
+        if (file && s?.files.get(file) !== before) this.refreshMarks(cx);
+        cx.notify();
+      }
+      if (ctx.gitAgain) { ctx.gitAgain = false; this.gitRefresh(ctx, cx); }
+    });
+  }
+
+  /** Changed lines of the shown file: none when clean or outside a repo, all for an untracked one. */
+  refreshMarks(cx) {
+    const file = this.file, doc = this.doc, ctx = this.ctx;
+    const letter = file && this.git ? this.git.files.get(file) : undefined;
+    if (!doc || (doc.kind !== "markdown" && doc.kind !== "text") || !letter) return this.setMarks(null);
+    if (letter === "U") return this.setMarks(git.added(doc.text));
+    if (this.marking) { this.markAgain = true; return; }
+    this.marking = true;
+    const root = this.tree.root;
+    cx.spawn(async (cx) => {
+      let m;
+      try { m = await git.changes(root, file, doc.text, ctx.on); }
+      finally { this.marking = false; }
+      if (this.ctx === ctx && this.file === file && this.doc === doc && m !== undefined) { this.setMarks(m); cx.notify(); }
+      if (this.markAgain) { this.markAgain = false; this.refreshMarks(cx); }
+    });
+  }
+
+  setMarks(m) {
+    this.marks = m;
+    this.decorate();
+  }
+
+  /**
+   * Puts the marks on what shows them: each Markdown block gets a bar kind and deletion
+   * markers (top / bottom); the code view gets runs of changed lines.
+   */
+  decorate() {
+    const m = this.marks;
+    this.codeMarks = m && this.doc?.kind === "text" ? { runs: git.runs(m), dels: [...m.dels].sort((a, b) => a - b) } : null;
+    const blocks = this.blocks.filter((b) => b.start);
+    for (const b of blocks) b.mark = m ? { bar: git.rangeKind(m, b.start, b.end), top: false, bottom: false } : null;
+    if (!m || !blocks.length) return;
+    for (const n of m.dels) {
+      // After line n: the first block that ends at or below it, else the last one's bottom.
+      const b = blocks.find((b) => b.end >= n);
+      if (!b) blocks[blocks.length - 1].mark.bottom = true;
+      else if (n === b.end && n >= b.start) b.mark.bottom = true;
+      else b.mark.top = true;
+    }
   }
 
   /** Remote (or polled) file: re-read only when its mtime or size moves. */
@@ -387,7 +475,7 @@ export default class FilePreview extends View {
    */
   show(rel, cx, { quiet = false, keep = false } = {}) {
     const seq = ++this.seq;
-    if (rel !== this.file) { this.release(); this.doc = null; this.stamp = null; this.loadedAt = null; }
+    if (rel !== this.file) { this.release(); this.doc = null; this.stamp = null; this.loadedAt = null; this.marks = null; this.codeMarks = null; }
     this.file = rel;
     if (!quiet) { this.note = null; this.loadingFile = Boolean(rel); }
     if (!rel || !cx) { this.loadingFile = false; return; }
@@ -399,6 +487,7 @@ export default class FilePreview extends View {
       if (this.seq !== seq || this.ctx !== ctx) return;
       this.loadingFile = false;
       if (keep && doc.kind === "missing") { this.show(null); cx.notify(); return; }
+      if (doc.kind === "text") doc.lines = rowCount(doc.text);
       const prev = this.doc;
       if (prev && prev.kind === doc.kind && prev.text === doc.text && prev.message === doc.message && prev.truncated === doc.truncated) { cx.notify(); return; }
       if (doc.kind === "markdown") {
@@ -411,6 +500,8 @@ export default class FilePreview extends View {
       this.doc = doc;
       this.loadedAt = Date.now();
       if (!this.patch(prev, cx)) this.build(cx);
+      this.decorate();
+      this.refreshMarks(cx);
       cx.notify();
     });
   }
@@ -421,16 +512,16 @@ export default class FilePreview extends View {
     let editors = 0;
     for (const s of segments) {
       if (s.kind === "md") { out.push(s); continue; }
-      const mermaid = s.info.toLowerCase() === "mermaid";
-      if (editors >= MAX_EDITORS) { out.push({ kind: "md", text: "```" + s.info + "\n" + s.text + "\n```" }); continue; }
+      const mermaid = s.info.toLowerCase() === "mermaid", start = s.start, end = s.end;
+      if (editors >= MAX_EDITORS) { out.push({ kind: "md", text: "```" + s.info + "\n" + s.text + "\n```", start, end }); continue; }
       editors++;
       const lines = Math.max(1, s.text.split("\n").length);
       // A wrapped fence's height follows the column width (rows()).
-      if (!mermaid) { out.push({ kind: "code", info: s.info, text: s.text, lines, wrap: lang.wraps(lang.forFence(s.info)) }); continue; }
+      if (!mermaid) { out.push({ kind: "code", info: s.info, text: s.text, lines, start, end, wrap: lang.wraps(lang.forFence(s.info)) }); continue; }
       // Diagrams are compared by source: unchanged ones keep their render across a reload.
       const hash = fnv1a(s.text), n = (seen.get(hash) ?? 0) + 1;
       seen.set(hash, n);
-      out.push({ kind: "mmd", info: s.info, text: s.text, lines, hash, id: n === 1 ? `mmd-${hash}` : `mmd-${hash}-${n}` });
+      out.push({ kind: "mmd", info: s.info, text: s.text, lines, start, end, hash, id: n === 1 ? `mmd-${hash}` : `mmd-${hash}-${n}` });
     }
     return out;
   }
@@ -450,13 +541,13 @@ export default class FilePreview extends View {
       const old = this.blocks[i];
       if (b.kind === "md") { this.blocks[i] = b; return; }
       if (b.kind === "mmd") {
-        if (old.hash === b.hash) { old.id = b.id; return; }   // same diagram: keep its render
+        if (old.hash === b.hash) { old.id = b.id; old.start = b.start; old.end = b.end; return; }   // same diagram: keep its render
         old.state?.release();
         this.blocks[i] = b;
         return;
       }
       if (old.text !== b.text) old.state.set_value(b.text);
-      old.text = b.text; old.lines = b.lines; old.vis = null;
+      old.text = b.text; old.lines = b.lines; old.vis = null; old.start = b.start; old.end = b.end;
     });
     this.diagrams(cx);
     return true;
@@ -764,7 +855,7 @@ export default class FilePreview extends View {
     if (settings().dark !== this.dark) {
       // Theme flipped: syntax colors are baked into the EditorStates, so rebuild them (outside render).
       this.dark = settings().dark;
-      cx.spawn(async (cx) => { this.build(cx); cx.notify(); });
+      cx.spawn(async (cx) => { this.build(cx); this.decorate(); cx.notify(); });
     }
     const rows = this.tree.rows(), narrow = this.narrow(), shown = this.treeShown();
     // The expanded diagram replaces the popup's content: nothing under it can take the pointer
@@ -820,12 +911,17 @@ export default class FilePreview extends View {
     const md = !r.dir && lang.isMarkdown(r.name), code = !r.dir && lang.forPath(r.name);
     const open = r.dir && this.tree.expanded.has(r.path);
     const icon = r.dir ? (open ? "folder-open.svg" : "folder.svg") : md ? "file-md.svg" : code ? "file-code.svg" : "file.svg";
+    // Git: a file gets its letter, a folder with changes below it a dot; both tint the name.
+    const g = this.git ? (r.dir ? this.git.folders : this.git.files).get(r.path) : undefined;
+    const tint = g ? gitColor(g, t) : null;
     return h_flex().h(ROW).w_full().pl(6 + r.depth * 14).pr(8).gap(5).items_center()
       .when(r.path === this.cursor, (el) => el.bg(focus ? t.selected : t.hover))
       .child(r.dir ? svg(ICON + (open ? "chevron-down.svg" : "chevron-right.svg")).size(11).flex_none().text_color(t.dim) : div().w(11).flex_none())
       .child(svg(ICON + icon).size(14).flex_none().text_color(md ? t.accent : r.dir ? t.muted : t.dim))
-      .child(div().flex_1().min_w(0).truncate().text_color(r.path === this.file ? t.accent : r.denied ? t.dim : t.foreground).child(r.name))
-      .when(r.denied, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("no access")));
+      .child(div().flex_1().min_w(0).truncate().text_color(r.path === this.file ? t.accent : r.denied ? t.dim : tint ?? t.foreground).child(r.name))
+      .when(r.denied, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("no access")))
+      .when(Boolean(tint) && !r.dir, (el) => el.child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(tint).child(g)))
+      .when(Boolean(tint) && r.dir, (el) => el.child(h_flex().w(12).flex_none().justify_center().child(div().size(5).rounded_full().bg(tint))));
   }
 
   /** The hidden tree's strip (and a narrow view's), with its toggle. */
@@ -934,14 +1030,64 @@ export default class FilePreview extends View {
         .child(h_flex().w_full().justify_center().px(narrow ? 12 : 24).py(narrow ? 12 : 20)
           .child(v_flex().id("fp-col").w_full().max_w(860).gap(Math.round(12 * this.textZoom)).text_size(this.proseSize())
             .on_size_change((size, cx) => { if (Math.round(size.width) !== this.colW) { this.colW = Math.round(size.width); cx.notify(); } })
-            .children(this.blocks.map((b, i) => b.kind === "md"
+            .children(this.blocks.map((b, i) => this.marked(b, t, b.kind === "md"
               ? TextView.markdown(`md-${i}`, b.text).selectable(true).on_link_click((url, cx) => this.link(url, cx))
-              : b.kind === "mmd" ? this.diagramBlock(b, i, t) : this.codeBlock(b, i, t)))));
-    else if (doc.kind === "text" && this.code) body = div().flex_1().min_h(0).size_full().child(Editor.new(this.code).size_full());
+              : b.kind === "mmd" ? this.diagramBlock(b, i, t) : this.codeBlock(b, i, t))))));
+    else if (doc.kind === "text" && this.code) body = this.codeView(t);
     else body = this.message(t, doc.message ?? "Cannot preview this file");
     return v_flex().id("fp-preview-pane").flex_1().min_w(0).h_full().min_h(0).bg(t.surface)
       .track_focus(this.previewFocus).on_key_down((e, cx) => this.onKey(e, cx, "preview"))
       .child(body);
+  }
+
+  /**
+   * A Markdown block with its git marks, drawn in the column's side padding so nothing moves:
+   * a bar for added or modified lines, a red triangle where lines were deleted.
+   */
+  marked(b, t, el) {
+    const m = b.mark;
+    return v_flex().w_full().flex_none().relative().child(el)
+      .when(Boolean(m?.bar), (e) => e.child(div().absolute().top(0).bottom(0).left(-BAR_X).w(3).rounded(1).bg(barColor(m.bar, t))))
+      .when(Boolean(m?.top), (e) => e.child(svg(ICON + "deleted.svg").size(7).absolute().top(-4).left(-BAR_X - 1).text_color(t.ansi1)))
+      .when(Boolean(m?.bottom), (e) => e.child(svg(ICON + "deleted.svg").size(7).absolute().bottom(-4).left(-BAR_X - 1).text_color(t.ansi1)));
+  }
+
+  /** How the code view lays out: "full" (line gutter, outer scroll) or "plain" (the Editor scrolls; ruler). */
+  codeLayout() {
+    if (!this.git || !this.doc || lang.wraps(lang.forPath(this.file ?? ""))) return "plain";
+    return this.doc.lines <= FULL_MAX ? "full" : "plain";
+  }
+
+  /**
+   * The whole-file Editor. In a repo it is laid out at its full height (taller than its text, so
+   * it never scrolls itself) inside a scrolling box, next to a gutter of changed lines that
+   * scrolls with it. Past FULL_MAX lines, or soft-wrapped, it keeps its own scroll and the
+   * changes go on an overview ruler at the right edge.
+   */
+  codeView(t) {
+    const editor = Editor.new(this.code).size_full(), m = this.codeMarks;
+    if (this.codeLayout() === "plain") {
+      const box = div().flex_1().min_w(0).h_full().child(editor);
+      if (!this.git) return div().flex_1().min_h(0).size_full().child(box);
+      // Rows [from, from + n) as a share of the strip; the lower half hangs from the bottom so a
+      // 2 px minimum never pokes out of the strip.
+      const rows = Math.max(1, this.doc.lines), pct = (n) => `${(100 * n) / rows}%`;
+      const at = (el, from, n) => (2 * from + n <= rows ? el.top(pct(from)) : el.bottom(pct(rows - from - n)));
+      return h_flex().flex_1().min_h(0).size_full().child(box)
+        .child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
+          .when(Boolean(m), (e) => e
+            .children(m.runs.map((r) => at(div().absolute().left(2).w(RULER - 4).h(pct(r.n)).min_h(2).bg(barColor(r.kind, t)), r.from - 1, r.n)))
+            .children(m.dels.map((n) => at(div().absolute().left(1).w(RULER - 2).h(2).bg(t.ansi1), n, 0)))));
+    }
+    const lh = lineHeight(this.codeFont), text = this.doc.lines * lh, slack = Math.max(text, 3 * lh);
+    return div().id(`code:${this.file}`).flex_1().min_h(0).size_full().overflow_y_scrollbar()
+      .child(h_flex().w_full().h(text).flex_none().items_start()
+        .child(div().w(GUTTER).h(text).flex_none().relative()
+          .when(Boolean(m), (e) => e
+            .children(m.runs.map((r) => div().absolute().left(3).w(3).top((r.from - 1) * lh).h(r.n * lh).bg(barColor(r.kind, t))))
+            .children(m.dels.map((n) => svg(ICON + "deleted.svg").size(7).absolute().left(1).top(Math.max(0, Math.min(text - 7, n * lh - 3.5))).text_color(t.ansi1)))))
+        .child(div().flex_1().min_w(0).h(text).overflow_hidden()
+          .child(div().w_full().h(text + slack).flex_none().child(editor))));
   }
 
   statusBar(t) {

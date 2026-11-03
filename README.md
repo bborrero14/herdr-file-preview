@@ -46,6 +46,27 @@ as a panel docked to the right of the terminal.
   current file open.
 - **Remote spaces**: the tree, file reads and live reload all work on remote Unix
   machines. Diagrams are always rendered on the local machine.
+- **Git changes, VS Code style.** Inside a git repository (local or remote), the tree
+  colors changed files and gives each a letter, and folders with changes below them get
+  a dot. The document marks what changed against `HEAD` (staged and unstaged together):
+  - Markdown: a 3 px bar left of each block (a prose run, a fence or a diagram) that
+    has added or modified lines, and a small red triangle where lines were deleted.
+  - Code files up to 1,000 lines: a gutter left of the line numbers, line by line.
+    Longer files (and soft-wrapped JSON) get an overview ruler on the right edge instead.
+
+  | Mark | Meaning | Color |
+  |---|---|---|
+  | `M` | modified | yellow (`ansi3`) |
+  | `A` | added to the index, or renamed (shown on the new name) | green (`ansi2`) |
+  | `U` | untracked | green (`ansi2`) |
+  | `!` | merge conflict | red (`ansi1`) |
+  | `●` on a folder | something below it changed (the strongest color wins) | as above |
+  | bar | added lines / modified lines | green / blue (`ansi4`) |
+  | ▸ | lines deleted here | red |
+
+  Deleted files aren't in the tree, so they get no mark; ignored files are left alone.
+  Outside a repository, or without git, nothing is drawn. The marks refresh with live
+  reload and every 5 s while the mod is open.
 - **Live reload**: the open file and the expanded folders update as files change. Local
   spaces use a file watcher. Remote spaces poll: every 2.5 s for the open file and every
   10 s for the tree.
@@ -56,6 +77,7 @@ as a panel docked to the right of the terminal.
 ## Requirements
 
 - **Herdr app** on macOS or Linux. Remote spaces need a Unix machine with `sh` and `stat`.
+- **Optional, for git change marks:** `git` on the machine that holds the files.
 - **Optional, for Mermaid diagrams:**
   - [`@mermaid-js/mermaid-cli`](https://github.com/mermaid-js/mermaid-cli) (`mmdc`):
     `npm install -g @mermaid-js/mermaid-cli`
@@ -81,7 +103,8 @@ Without mermaid-cli everything else works, and diagrams appear as source code.
 
 As the herdr.dev guidance asks, here is what the mod does outside its own folder:
 
-- It **runs programs** with `exec`: `sh` (folder listings, `stat`, file probes),
+- It **runs programs** with `exec`: `sh` (folder listings, `stat`, file probes, and
+  read-only `git rev-parse`, `git status` and `git diff`, which never write under `.git`),
   `node` with `mmdc`, which starts headless Chrome, and `open` or `xdg-open` for links
   you click. Login shells are only used to look up `mmdc`.
 - It **reads files anywhere** under the folder you browse, on local or remote machines.
@@ -172,6 +195,16 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 - macOS and Linux only; remote spaces must be Unix. **Windows is not supported.**
 - Mermaid needs Chrome or Chromium on the local machine. Each diagram renders once
   (about 1 s warm, about 5 s cold) and is cached by content and theme.
+- **Git marks on Markdown are per block.** All prose between two fences is one block, so
+  its bar covers the whole run even when one line changed. A deletion inside a block
+  shows at the block's top.
+- **Code files over 1,000 lines get the ruler, not the gutter.** The gutter needs the
+  editor laid out at full height, which costs about 16 ms per frame at 1,000 lines and
+  45 ms at 2,000. In a repository, a code file up to that size scrolls as a whole page:
+  its horizontal scrollbar is hidden (scroll sideways with the trackpad), and moving the
+  cursor with the keyboard doesn't scroll the view.
+- Git marks compare with `HEAD` only; there is no inline diff, blame or staging. A
+  repository with more than 20,000 changed or untracked files shows the first 20,000.
 - Embedded Markdown images, PDF, CSV-as-table and HTML rendering are out of scope.
   The mod is read-only.
 
@@ -194,7 +227,7 @@ and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 ## Repository layout
 
 ```
-mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, mermaid.js, zoom.js, dock.js, icons/)
+mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, git.js, mermaid.js, zoom.js, dock.js, icons/)
 mods/file-preview-panel/   launcher for the right panel (main.js, dock.js copy)
 scripts/sync.sh            install / update into ~/.config/herdr-app/mods/
 scripts/make-big-md.sh     generates docs/fixtures/big.md (> 1 MB, not versioned)
