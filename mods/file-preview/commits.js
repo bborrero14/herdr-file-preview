@@ -1,4 +1,5 @@
-// Commit history, read-only: paged `git log` with graph lanes, one commit's files and diff, a file as of a commit.
+// Commit history, read-only: paged `git log` with graph lanes, one commit's files and diff, a file as of a commit,
+// and the diff of one uncommitted change.
 import { exec } from "herdr";
 import { GIT } from "./git.js";
 import { classify, LIMIT } from "./source.js";
@@ -28,6 +29,13 @@ const SHOW = GIT + '; r=$1; s=$2; command -v git >/dev/null 2>&1 || exit 4; '
   + 'set -- --format= --diff-merges=first-parent -M --no-color --no-ext-diff --no-textconv; '
   + 'g show "$@" --name-status -z "$s"; printf "\\001"; g show "$@" --numstat -z "$s"; printf "\\001"; '
   + 'g show "$@" --patch "$s" | head -c ' + DIFF_BYTES;
+
+// $1 root, $2 "staged" | "unstaged" | "untracked", $3 path from the repo's top, $4 path from the root, $5 the old
+// path of a staged rename (from the top) or "". numstat \1 patch (capped in bytes). `diff --no-index` exits 1
+// when the files differ, so the exit code says nothing past "git is there".
+const CHANGE = GIT + '; r=$1; command -v git >/dev/null 2>&1 || exit 4; '
+  + 'case $2 in staged) set -- --cached -M -- ":(top)$3" ${5:+":(top)$5"};; unstaged) set -- -- ":(top)$3";; *) set -- --no-index -- /dev/null "$4";; esac; '
+  + 'set -- --no-color --no-ext-diff --no-textconv "$@"; g diff --numstat -z "$@"; printf "\\001"; g diff "$@" | head -c ' + DIFF_BYTES + '; exit 0';
 
 // $1 root, $2 "<rev>:<repo path>". The file's bytes, capped.
 const CAT = GIT + '; r=$1; command -v git >/dev/null 2>&1 || exit 4; g cat-file -e "$2" 2>/dev/null || exit 5; g show "$2" | head -c ' + (LIMIT + 1);
@@ -261,6 +269,21 @@ export async function show(root, on, sha, remotes = []) {
   c.files = names.map((n, i) => ({ ...n, add: nums[i]?.add ?? 0, del: nums[i]?.del ?? 0, binary: Boolean(nums[i]?.binary || p.files[i]?.binary), diff: p.files[i] ?? null }));
   c.truncated = cutBytes || p.files.some((x) => x.cut);
   return c;
+}
+
+/**
+ * One uncommitted change (a git.status() changes entry in `section`), shaped like a commit's file.
+ * -> undefined (unreachable) | { error } | { status, path, from, add, del, binary, diff, truncated }
+ */
+export async function change(root, on, section, e) {
+  const r = await exec("sh", ["-c", CHANGE, "fp", root, section, e.top, e.path, e.from ?? ""], { on }).catch(() => undefined);
+  if (!r) return undefined;
+  if (r.code === 4) return { error: "git is not installed" };
+  const parts = r.stdout.split("\x01"), nums = numstat(parts[0] ?? "");
+  const patch = parts.slice(1).join("\x01").replace(/^\n+/, ""), cutBytes = patch.length >= DIFF_BYTES;
+  const d = patches(patch, cutBytes).files[0] ?? null;
+  return { status: e.status, path: e.path, from: e.from, add: nums[0]?.add ?? 0, del: nums[0]?.del ?? 0,
+    binary: Boolean(nums[0]?.binary || d?.binary), diff: d, truncated: Boolean(d?.cut) };
 }
 
 /**

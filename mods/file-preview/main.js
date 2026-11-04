@@ -49,12 +49,13 @@ const BAR_X = 8;             // a Markdown block's bar sits this far left of the
 const FILES_EVERY = 5000;    // an open file search re-lists the root at most this often
 const MEMORY_DELAY = 500;    // the popup stores its per-root state this long after the last change
 // Commit history in the sidebar.
-const SIDE_KEY = "file-preview.sidebar.";   // + "popup" | "panel": "commits", or null for files
+const SIDE_KEY = "file-preview.sidebar.";   // + "popup" | "panel": "commits" | "changes", or null for files
 const CROW = 24;             // commit row height
 const LANE_W = 14, NARROW_LANE_W = 10, MAX_LANES = 10, NARROW_MAX_LANES = 6;
 const COMMITS_W = 460;       // the sidebar's width on the Commits tab, when the view is wide
 const META_W = 360;          // author and date show from this sidebar width
-const SIDE_W_KEY = "file-preview.sidebar-width.";   // + mode + "." + "files" | "commits" | "narrow": px, or null
+const SIDE_W_KEY = "file-preview.sidebar-width.";   // + mode + "." + "files" | "commits" | "changes" | "narrow": px, or null
+const SECTIONS = [["staged", "Staged"], ["unstaged", "Unstaged"], ["untracked", "Untracked"]];   // the Changes tab
 const MIN_SIDE_W = 160, MIN_PREVIEW_W = 240;          // a dragged sidebar keeps the preview at least this wide
 const statusColor = (s, t) => (s === "A" ? t.ansi2 : s === "D" ? t.ansi1 : s === "R" || s === "C" ? t.ansi4 : t.ansi3);
 
@@ -151,11 +152,15 @@ export default class FilePreview extends View {
     this.treeFocus = cx.focus_handle();
     this.previewFocus = cx.focus_handle();
     this.commitsFocus = cx.focus_handle();
+    this.changesFocus = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
     this.commitScroll = VirtualListScrollHandle.new();
-    this.side = shared(SIDE_KEY + this.mode) === "commits" ? "commits" : "files";   // the sidebar tab chosen
+    const side = shared(SIDE_KEY + this.mode);
+    this.side = side === "commits" || side === "changes" ? side : "files";   // the sidebar tab chosen
     this.scope = "all";     // history of every ref ("all") or of HEAD ("head")
-    this.commit = null;     // the commit shown: { hash, data, loading, error }
+    this.commit = null;     // the commit shown: { hash, data, loading, error }; or an uncommitted change: { change, ... }
+    this.changeScroll = VirtualListScrollHandle.new();
+    this.changeCursor = null;   // keyboard row of the Changes tab ("<section>:<rel path>")
     this.atCommit = null;   // a file shown as of a commit: { hash, short, subject, path, kept }
     this.findScroll = VirtualListScrollHandle.new();
     this.ts = null;         // file search of the tree: { input, query, results, total, at, ... }
@@ -235,6 +240,8 @@ export default class FilePreview extends View {
     this.treeFocus?.release();
     this.previewFocus?.release();
     this.commitsFocus?.release();
+    this.changesFocus?.release();
+    this.changeScroll?.release();
   }
 
   // ---- context and tree ----------------------------------------------------
@@ -337,6 +344,7 @@ export default class FilePreview extends View {
   reload(cx) {
     this.refreshTree(this.ctx, null, cx, true);
     if (this.ctx?.log) this.loadLog(this.ctx, cx);
+    if (this.commit?.change) return this.refreshChange(cx);
     if (this.commit || this.atCommit) return;   // a commit never changes
     if (this.file) this.show(this.file, cx);
   }
@@ -477,13 +485,14 @@ export default class FilePreview extends View {
       if (this.ctx !== ctx) return;
       if (s !== undefined && !git.same(this.git, s)) {
         const file = this.file, before = file ? this.git?.files.get(file) : undefined;
-        const side = this.sideNow(), had = this.treeFocus.is_focused() || this.commitsFocus.is_focused();
+        const side = this.sideNow(), had = this.sideFocused();
         this.git = s;
         // In or out of a repo: the Commits tab comes or goes, and the keyboard follows the sidebar.
         if (side !== this.sideNow() && had) this.sideFocus().focus();
         if (file && s?.files.get(file) !== before) this.refreshMarks(cx);
         cx.notify();
       }
+      if (s !== undefined && this.commit?.change) this.refreshChange(cx);
       if (this.sideNow() === "commits" && ctx.log) this.logCheck(ctx, cx);
       if (ctx.gitAgain) { ctx.gitAgain = false; this.gitRefresh(ctx, cx); }
     });
@@ -1082,7 +1091,9 @@ export default class FilePreview extends View {
     if (c === "find-close") { if (this.ds && this.findSide() === "doc") this.closeDocFind(); else if (this.ts) this.closeTreeFind(cx); else this.closeDocFind(); return; }
     // Commits: tab:files, tab:commits, commits-scope (all refs / current branch), commits-more,
     // commit:<row index | hash prefix>, commit-file:<n>, commit-back, commit-close, copy-hash.
-    if (c === "tab:files" || c === "tab:commits") return this.setSide(c.slice(4), cx);
+    if (c === "tab:files" || c === "tab:commits" || c === "tab:changes") return this.setSide(c.slice(4), cx);
+    // Changes: change:<row index | path>, opens that change's diff.
+    if (c.startsWith("change:")) return this.changeCmd(c.slice(7), cx);
     if (c === "commits-scope") return this.toggleScope(cx);
     if (c === "commits-more") return this.loadLog(this.ctx, cx, { more: true });
     if (c.startsWith("commit:")) return this.commitCmd(c.slice(7), cx);
@@ -1096,6 +1107,7 @@ export default class FilePreview extends View {
       return;
     }
     if (this.sideNow() === "commits" && this.commitKey(c, cx)) return;
+    if (this.sideNow() === "changes" && this.changeKey(c, cx)) return;
     this.treeKey(c, cx);
   }
 
@@ -1153,6 +1165,7 @@ export default class FilePreview extends View {
     let used;
     if (where === "tree") used = this.treeKey(e.key, cx);
     else if (where === "commits") used = this.commitKey(e.key, cx);
+    else if (where === "changes") used = this.changeKey(e.key, cx);
     else if (e.key === "tab") { this.focusTree(true); used = true; }
     else if (e.key === "backspace" && this.atCommit) { this.commitBack(cx); used = true; }
     else if (e.key === "r") { this.reload(cx); used = true; }
@@ -1161,7 +1174,7 @@ export default class FilePreview extends View {
   }
 
   openFind(where, cx) {
-    if (where === "commits") return;
+    if (where === "commits" || where === "changes") return;
     if (where === "tree") this.openTreeFind(cx); else this.openDocFind(cx);
   }
 
@@ -1199,7 +1212,7 @@ export default class FilePreview extends View {
     if (w === this.width) return;
     const was = this.treeShown();
     this.width = w;
-    if (was && !this.treeShown() && (this.treeFocus.is_focused() || this.commitsFocus.is_focused())) this.previewFocus.focus();   // its element goes
+    if (was && !this.treeShown() && this.sideFocused()) this.previewFocus.focus();   // its element goes
     cx.notify();
   }
 
@@ -1249,16 +1262,17 @@ export default class FilePreview extends View {
 
   // ---- commits ---------------------------------------------------------------
 
-  /** "commits" when chosen and the root is in a repo; else "files". */
-  sideNow() { return this.side === "commits" && this.git ? "commits" : "files"; }
-  sideFocus() { return this.sideNow() === "commits" ? this.commitsFocus : this.treeFocus; }
+  /** "commits" or "changes" when chosen and the root is in a repo; else "files". */
+  sideNow() { return this.side !== "files" && this.git ? this.side : "files"; }
+  sideFocus() { const s = this.sideNow(); return s === "commits" ? this.commitsFocus : s === "changes" ? this.changesFocus : this.treeFocus; }
+  sideFocused() { return this.treeFocus.is_focused() || this.commitsFocus.is_focused() || this.changesFocus.is_focused(); }
 
   /** A tab of the sidebar, remembered per mode. */
   setSide(side, cx) {
-    if (side === "commits" && !this.git) { this.note = "Not in a git repository"; return; }
-    const had = this.treeFocus.is_focused() || this.commitsFocus.is_focused();
+    if (side !== "files" && !this.git) { this.note = "Not in a git repository"; return; }
+    const had = this.sideFocused();
     this.side = side;
-    setShared(SIDE_KEY + this.mode, side === "commits" ? "commits" : null);
+    setShared(SIDE_KEY + this.mode, side === "files" ? null : side);
     if (side === "commits" && this.ctx?.log) this.logCheck(this.ctx, cx);
     if (had || !this.previewFocus.is_focused()) this.sideFocus().focus();
     cx?.notify();
@@ -1435,6 +1449,7 @@ export default class FilePreview extends View {
   openAt(n, cx) {
     const d = this.commit?.data, f = d?.files[n];
     if (!f) { this.note = `No file ${n} in this commit`; cx.notify(); return; }
+    if (this.commit.change) { if (f.status !== "D") this.show(f.path, cx); cx.notify(); return; }
     this.openAtPath(f.path, f.status === "D" ? `${d.hash}^` : d.hash, cx, f.status === "D");
   }
 
@@ -1457,7 +1472,163 @@ export default class FilePreview extends View {
     cx?.notify();
   }
 
+  // ---- uncommitted changes ----------------------------------------------------
+
+  /** The Changes tab's rows: a header per section that has entries, then its files. */
+  changeRows() {
+    const c = this.git?.changes, out = [];
+    if (!c) return out;
+    for (const [section, label] of SECTIONS) {
+      const list = c[section];
+      if (!list.length) continue;
+      out.push({ key: `head:${section}`, head: true, label, n: list.length });
+      for (const e of list) out.push({ key: `${section}:${e.path}`, section, label, e });
+    }
+    return out;
+  }
+
+  /** Returns true when the key was used. */
+  changeKey(k, cx) {
+    const rows = this.changeRows(), i = rows.findIndex((r) => r.key === this.changeCursor);
+    // Headers are skipped: the cursor lands on the next file in the direction of travel.
+    const move = (j, d) => {
+      if (!rows.length) return;
+      j = Math.max(0, Math.min(rows.length - 1, j));
+      while (rows[j]?.head) j += d;
+      if (!rows[j]) { j -= d; while (rows[j]?.head) j -= d; }
+      if (!rows[j]) return;
+      this.changeCursor = rows[j].key;
+      this.changeScroll.scroll_to_item(j);
+    };
+    if (k === "down") move(i + 1, 1);
+    else if (k === "up") move(i < 0 ? 0 : i - 1, -1);
+    else if (k === "pagedown") move(i + 20, 1);
+    else if (k === "pageup") move(i - 20, -1);
+    else if (k === "home") move(0, 1);
+    else if (k === "end") move(rows.length - 1, -1);
+    else if (k === "enter" || k === "space") { if (rows[i] && !rows[i].head) this.openChange(rows[i], cx); }
+    else if (k === "tab") this.previewFocus.focus();
+    else if (k === "r") this.reload(cx);
+    else if (k === "b") this.toggleTree();
+    else if (k === "g") this.setSide("files", cx);
+    else return false;
+    cx.notify();
+    return true;
+  }
+
+  changeClick(key, cx) {
+    this.changesFocus.focus();
+    const row = this.changeRows().find((r) => r.key === key);
+    if (!row || row.head) return;
+    this.changeCursor = key;
+    this.openChange(row, cx);
+  }
+
+  /** Dev hook: a file's index (headers not counted) or a path (the first section that has it). */
+  changeCmd(a, cx) {
+    const rows = this.changeRows();
+    const i = /^\d{1,5}$/.test(a) ? rows.indexOf(rows.filter((r) => !r.head)[Number(a)]) : rows.findIndex((r) => !r.head && r.e.path === a);
+    if (!rows[i] || rows[i].head) { this.note = `No change ${a}`; return; }
+    this.changeCursor = rows[i].key;
+    this.changeScroll.scroll_to_item(i, "center");
+    this.openChange(rows[i], cx);
+  }
+
+  /** Shows one uncommitted change's diff in the preview, in the commit view's place. */
+  openChange(row, cx) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (this.atCommit) this.commitBack(cx);
+    if (this.commit?.change?.key === row.key && !this.commit.error) { cx.notify(); return; }
+    this.closeCommitView();
+    if (this.ds) this.closeDocFind(false);
+    this.note = null;
+    this.commit = { hash: null, change: { key: row.key, section: row.section, label: row.label, path: row.e.path, e: row.e }, data: null, loading: true, error: null };
+    this.loadChange(cx);
+    cx.notify();
+  }
+
+  /** The shown change again, when git status runs: gone from its section, or a new diff. */
+  refreshChange(cx) {
+    const ch = this.commit?.change;
+    if (!ch || this.commit.loading) return;
+    const e = this.git?.changes[ch.section]?.find((x) => x.path === ch.path);
+    if (!e) {
+      for (const f of this.commit.data?.files ?? []) f.state?.release();
+      Object.assign(this.commit, { data: null, error: `No ${ch.label.toLowerCase()} changes in ${ch.path} anymore` });
+      cx.notify();
+      return;
+    }
+    ch.e = e;
+    this.loadChange(cx, true);
+  }
+
+  loadChange(cx, quiet = false) {
+    const view = this.commit, ctx = this.ctx, ch = view.change, root = this.tree.root;
+    if (view.busy) { view.again = true; return; }
+    view.busy = true;
+    cx.spawn(async (cx) => {
+      let f;
+      try { f = await hist.change(root, ctx.on, ch.section, ch.e); }
+      finally { view.busy = false; }
+      if (this.commit !== view || this.ctx !== ctx) return;
+      view.loading = false;
+      if (f === undefined && quiet) return;   // unreachable for a moment: keep what is shown
+      const old = view.data?.files[0];
+      if (!f || f.error) { view.error = f?.error ?? `Cannot reach ${ctx.on ?? "git"}`; old?.state?.release(); view.data = null; }
+      else if (old && old.binary === f.binary && (old.diff?.lines.join("\n") ?? "") === (f.diff?.lines.join("\n") ?? "")) Object.assign(old, { add: f.add, del: f.del, status: f.status });
+      else {
+        old?.state?.release();
+        if (f.diff?.lines.length) { f.runs = this.diffRuns(f.diff.kinds); f.state = this.diffState(f); }
+        view.error = null;
+        view.data = { files: [f], truncated: f.truncated };
+      }
+      cx.notify();
+      if (view.again) { view.again = false; this.loadChange(cx, true); }
+    });
+  }
+
+  /** Over a change's diff: its section, the way to the file, and close. */
+  changeHeader(ch, t) {
+    const z = this.textZoom, f = this.commit?.data?.files[0];
+    return h_flex().w_full().flex_none().gap(8).px(Math.round(14 * z)).py(Math.round(10 * z)).items_center().rounded(8).border_1().border_color(t.border).bg(t.raised)
+      .child(div().flex_none().px(6).py(1).rounded(4).bg(t.hover).text_size(11).text_color(t.muted).child(ch.label))
+      .child(div().flex_1().min_w(0).truncate().text_size(Math.round(14 * z)).font_bold().child(f?.from ? `${f.from} → ${ch.path}` : ch.path))
+      .when(Boolean(f) && !f.binary, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi2).child(`+${f.add}`))
+        .child(div().flex_none().text_size(11.5).text_color(t.ansi1).child(`−${f.del}`)))
+      .when(f?.status !== "D", (el) => el.child(h_flex().id("fp-change-open").h(22).px(6).flex_none().rounded(5).items_center().cursor_pointer()
+        .hover((s) => s.bg(t.hover)).text_size(12).text_color(t.accent).on_click((_e, cx) => this.openAt(0, cx)).child("Open file")))
+      .child(this.button("fp-change-close", "close.svg", t, (_e, cx) => { this.closeCommitView(); cx.notify(); }));
+  }
+
+  /** The Changes tab: Staged, Unstaged and Untracked, a header each, as one virtual list. */
+  changesPane(t) {
+    const rows = this.changeRows(), focus = this.changesFocus.is_focused(), open = this.commit?.change?.key;
+    return v_flex().id("fp-changes-pane").w_full().flex_1().min_h(0)
+      .track_focus(this.changesFocus).on_key_down((e, cx) => this.onKey(e, cx, "changes"))
+      .when(rows.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().py(4)
+        .child(v_virtual_list("fp-changes", rows.length, ROW, (i) => rows[i].key,
+          (range) => rows.slice(range.start, range.end).map((r) => this.changeRow(r, t, focus, open)))
+          .track_scroll(this.changeScroll).on_item_click((key, cx) => this.changeClick(key, cx)).size_full())
+        .child(Scrollbar.vertical("fp-changes").viewport_from_layout().absolute().inset_0())))
+      .when(!rows.length, (el) => el.child(v_flex().p(10).text_color(t.dim).child(this.git?.changes ? "No changes" : "Loading changes…")));
+  }
+
+  /** A section header (name, count) or a file: status letter, name, its folder. Pure (list renderer). */
+  changeRow(r, t, focus, open) {
+    if (r.head) return h_flex().h(ROW).w_full().px(10).gap(6).items_end().pb(3).text_size(11).font_medium().text_color(t.muted)
+      .child(div().flex_none().child(r.label.toUpperCase())).child(div().flex_none().text_color(t.dim).child(String(r.n)));
+    const e = r.e, cut = e.path.lastIndexOf("/"), name = e.path.slice(cut + 1), dir = cut > 0 ? e.path.slice(0, cut) : "";
+    const color = e.status === "U" ? gitColor("U", t) : e.status === "!" ? gitColor("!", t) : statusColor(e.status, t);
+    return h_flex().h(ROW).w_full().pl(10).pr(8).gap(6).items_center()
+      .when(r.key === this.changeCursor, (el) => el.bg(focus ? t.selected : t.hover))
+      .child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(color).child(e.status))
+      .child(div().flex_none().max_w("70%").truncate().text_color(r.key === open ? t.accent : t.foreground).child(name))
+      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(dir));
+  }
+
   statusName() {
+    if (this.commitShown() && this.commit.change) return `${this.commit.change.path} · ${this.commit.change.label.toLowerCase()}`;
     if (this.commitShown()) return `commit ${this.commit.hash.slice(0, 7)}`;
     if (this.atCommit) return `${this.atCommit.path} @ ${this.atCommit.short}`;
     return this.file ?? "No file";
@@ -1467,6 +1638,7 @@ export default class FilePreview extends View {
     const d = this.commit?.data;
     if (!d) return [];
     const add = d.files.reduce((s, f) => s + f.add, 0), del = d.files.reduce((s, f) => s + f.del, 0);
+    if (this.commit.change) return [`+${add.toLocaleString("en-US")} −${del.toLocaleString("en-US")}`, ...(d.truncated ? ["diff truncated"] : [])];
     return [plural(d.files.length, "file"), `+${add.toLocaleString("en-US")} −${del.toLocaleString("en-US")}`, ...(d.truncated ? ["diff truncated"] : [])];
   }
 
@@ -1675,8 +1847,9 @@ export default class FilePreview extends View {
     return v_flex().id("fp-side").size_full().min_h(0).border_r(1).border_color(t.border).bg(t.chrome).text_size(12.5)
       .on_size_change((size, cx) => { if (Math.round(size.width) !== this.sideW) { this.sideW = Math.round(size.width); cx.notify(); } })
       .when(Boolean(this.git), (el) => el.child(h_flex().h(28).flex_none().px(6).gap(2).items_end().border_b(1).border_color(t.border)
-        .child(this.sideTab("files", "Files", side, t)).child(this.sideTab("commits", "Commits", side, t))))
-      .child(side === "commits" ? this.commitsPane(t, w, cx) : this.treePane(rows, t));
+        .child(this.sideTab("files", "Files", side, t)).child(this.sideTab("commits", "Commits", side, t))
+        .child(this.sideTab("changes", "Changes", side, t))))
+      .child(side === "commits" ? this.commitsPane(t, w, cx) : side === "changes" ? this.changesPane(t) : this.treePane(rows, t));
   }
 
   sideTab(key, label, side, t) {
@@ -1781,17 +1954,17 @@ export default class FilePreview extends View {
 
   /** The shown commit: header, changed files, diff per file. */
   commitView(view, t, narrow) {
-    if (view.loading) return this.message(t, "Loading commit…");
-    if (view.error || !view.data) return this.message(t, view.error ?? "Cannot read this commit");
-    const d = view.data;
+    if (view.loading) return this.message(t, view.change ? "Loading diff…" : "Loading commit…");
+    if (view.error || !view.data) return this.message(t, view.error ?? (view.change ? "Cannot read this change" : "Cannot read this commit"));
+    const d = view.data, ch = view.change;
     let shown = 0;
-    return v_flex().id(`commit:${d.hash}`).flex_1().min_h(0).overflow_y_scrollbar()
+    return v_flex().id(ch ? `change:${ch.key}` : `commit:${d.hash}`).flex_1().min_h(0).overflow_y_scrollbar()
       .child(h_flex().w_full().justify_center().px(narrow ? 12 : 24).py(narrow ? 12 : 20)
         .child(v_flex().w_full().max_w(Math.round(COL_W * this.textZoom)).gap(Math.round(14 * this.textZoom)).text_size(this.proseSize())
-          .child(this.commitHeader(d, t, narrow))
-          .child(this.commitFiles(d, t))
+          .child(ch ? this.changeHeader(ch, t) : this.commitHeader(d, t, narrow))
+          .when(!ch, (el) => el.child(this.commitFiles(d, t)))
           .children(d.files.map((f, i) => { const el = this.diffBlock(f, i, t, shown); shown += f.diff?.lines.length ?? 0; return el; }))
-          .when(d.truncated, (el) => el.child(div().text_size(11.5).text_color(t.ansi3)
+          .when(d.truncated && !ch, (el) => el.child(div().text_size(11.5).text_color(t.ansi3)
             .child(`Diff truncated: at most ${hist.MAX_FILE_DIFF.toLocaleString("en-US")} lines per file and ${hist.MAX_DIFF.toLocaleString("en-US")} per commit`)))));
   }
 
@@ -2065,6 +2238,6 @@ export default class FilePreview extends View {
       .child(div().flex_none().max_w(480).truncate().text_color(this.file || this.commit ? t.muted : t.dim).child(this.statusName()))
       .children(parts.map((p) => div().flex_none().child("· " + p)))
       .child(div().flex_1())
-      .child(div().flex_none().child(this.treeFocus.is_focused() ? "tree" : this.commitsFocus.is_focused() ? "commits" : this.previewFocus.is_focused() ? "preview" : ""));
+      .child(div().flex_none().child(this.treeFocus.is_focused() ? "tree" : this.commitsFocus.is_focused() ? "commits" : this.changesFocus.is_focused() ? "changes" : this.previewFocus.is_focused() ? "preview" : ""));
   }
 }

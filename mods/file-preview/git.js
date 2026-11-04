@@ -28,22 +28,33 @@ const RANK = { "!": 3, M: 2, A: 1, U: 1 };
 
 /**
  * -> null (not a repo, no git) | undefined (machine unreachable: keep what is shown)
- *  | { files: Map<rel, letter>, folders: Map<rel, letter> }, paths relative to `root`, only under it.
+ *  | { files: Map<rel, letter>, folders: Map<rel, letter>, changes }, paths relative to `root`, only under it.
+ * `changes` is { staged, unstaged, untracked, sig }: [{ path, top, from, status }] per section (`top` and
+ * `from` from the repo's top; status a name-status letter) and a string that changes when any entry does.
  */
 export async function status(root, on) {
   const r = await exec("sh", ["-c", STATUS, "fp", root], { on }).catch(() => undefined);
   if (!r) return undefined;
   if (r.code !== 0) return null;
   const f = r.stdout.split("\0"), prefix = f[0], files = new Map(), folders = new Map();
+  const changes = { staged: [], unstaged: [], untracked: [], sig: "" };
   for (let i = 1, n = 0; i < f.length && n < MAX_ENTRIES; i++, n++) {
     const e = f[i];
     if (e.length < 4) continue;
     const xy = e.slice(0, 2), path = e.slice(3);
-    if (/[RC]/.test(xy)) i++;              // the old path follows a rename or copy
-    const l = letter(xy);
-    if (!l || !path.startsWith(prefix)) continue;
+    const from = /[RC]/.test(xy) ? f[++i] : null;   // the old path follows a rename or copy
+    if (!path.startsWith(prefix)) continue;
     const rel = path.slice(prefix.length);
     if (!rel || rel.endsWith("/")) continue;
+    changes.sig += e + "\0";
+    if (xy === "??") changes.untracked.push({ path: rel, top: path, from: null, status: "U" });
+    else if (xy.includes("U") || xy === "AA" || xy === "DD") changes.unstaged.push({ path: rel, top: path, from: null, status: "!" });
+    else {
+      if (xy[0] !== " ") changes.staged.push({ path: rel, top: path, from, status: xy[0] });
+      if (xy[1] !== " ") changes.unstaged.push({ path: rel, top: path, from: null, status: xy[1] });
+    }
+    const l = letter(xy);
+    if (!l) continue;
     files.set(rel, l);
     for (let k = rel.lastIndexOf("/"); k > 0; k = rel.lastIndexOf("/", k - 1)) {
       const dir = rel.slice(0, k), was = folders.get(dir);
@@ -51,7 +62,7 @@ export async function status(root, on) {
       folders.set(dir, l);
     }
   }
-  return { files, folders };
+  return { files, folders, changes };
 }
 
 const lineCount = (text) => (text ? text.split("\n").length - Number(text.endsWith("\n")) : 0);
@@ -86,9 +97,10 @@ export function added(text) {
   return { lines, dels: new Set() };
 }
 
-/** Same files and folders, so nothing to redraw. */
+/** Same files, folders and changes, so nothing to redraw. */
 export function same(a, b) {
   if (!a || !b) return a === b;
+  if (a.changes.sig !== b.changes.sig) return false;
   if (a.files.size !== b.files.size || a.folders.size !== b.folders.size) return false;
   for (const [k, v] of a.files) if (b.files.get(k) !== v) return false;
   for (const [k, v] of a.folders) if (b.folders.get(k) !== v) return false;

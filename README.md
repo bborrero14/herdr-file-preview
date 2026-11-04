@@ -98,9 +98,11 @@ as a panel docked to the right of the terminal.
   - `Enter` / `↓` / `n` go to the next block (or line), `shift-Enter` / `↑` / `shift-n`
     to the previous one, `Esc` closes the bar. The search survives live reload and is
     cleared when you open another file.
-- **Commit history** (GitLab-style graph). Inside a git repository the sidebar has two
-  tabs, **Files | Commits**; the choice is remembered separately for the popup and the
-  panel, and the tabs are hidden outside a repository.
+- **Commit history** (GitLab-style graph). Inside a git repository the sidebar has three
+  tabs, **Files | Commits | Changes**; the choice is remembered separately for the popup and
+  the panel, and the tabs are hidden outside a repository. Drag the sidebar's edge to resize
+  it: each tab (and the narrow view) keeps its own width, remembered for the popup and the
+  panel.
 
   ![The Commits tab: a GitLab-style graph with ref flags and a commit open in the preview](preview-commits.png)
 
@@ -129,6 +131,14 @@ as a panel docked to the right of the terminal.
   - The list refreshes when a ref moves (commit, checkout, branch, tag, fetch): the mod
     compares a checksum of `HEAD` and every ref on each git refresh, and keeps the
     selected commit by hash. Works on remote spaces.
+- **Uncommitted changes.** The Changes tab lists what `git status` reports under the root,
+  in three sections: **Staged**, **Unstaged** and **Untracked** (a file staged and then
+  edited again is in both of the first two), each row with its status letter and folder.
+  Click a file, or `Enter` on it, to show its diff in the preview: the index against `HEAD`
+  for Staged, the working tree against the index for Unstaged, the whole file as added for
+  Untracked. "Open file" shows the file itself. The list and the open diff refresh with the
+  git status (every 5 s and on file changes); a diff whose change is gone says so. Read-only:
+  nothing is staged or committed. Works on remote spaces.
 - **Live reload**: the open file and the expanded folders update as files change. Local
   spaces use a file watcher. Remote spaces poll: every 2.5 s for the open file and every
   10 s for the tree.
@@ -223,14 +233,15 @@ Inside the mod:
 | `/` or `cmd-f` | Find a file (tree focused) or find in the document (preview focused) |
 | `n` / `shift-n` | Next / previous match block while the document search is open (preview focused) |
 | `b` | Hide or show the file tree (remembered separately for the popup and the panel) |
-| `g` | Switch the sidebar between Files and Commits (in a git repository) |
+| `g` | Switch the sidebar from Files to Commits, and from Commits or Changes back to Files (in a git repository) |
 | `Backspace` | Back to the commit from a file shown as of that commit (preview focused) |
 | `+` (or `=`) / `-` | Reading zoom in / out (70 % to 200 %; remembered separately for the popup and the panel) |
 | `0` | Reading zoom back to 100 % |
 | `Esc` | Close the popup |
 
-In the Commits tab, `↑` `↓` `PageUp` `PageDown` `Home` `End` move the selection and `Enter`
-(or `Space`) shows the selected commit; `Tab`, `r`, `b` and `g` work as in the tree.
+In the Commits and Changes tabs, `↑` `↓` `PageUp` `PageDown` `Home` `End` move the selection
+and `Enter` (or `Space`) shows the selected commit or change; `Tab`, `r`, `b` and `g` work as
+in the tree.
 
 In a search field (keys typed there never trigger the shortcuts above):
 
