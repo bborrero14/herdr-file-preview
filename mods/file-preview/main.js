@@ -191,6 +191,7 @@ export default class FilePreview extends View {
     // The popup and the side panel (it follows the focused terminal from root to root) remember
     // their file and folders per root; a docked pane stays put anyway.
     this.remembers = this.mode === "side" || (this.mode === "popup" && Boolean(this.overlay));
+    this.page = "list";     // stacked (side panel): the sidebar's list, or "view" (what it opened, full width)
     const first = initial(p);
     this.start(first, ctxKey(first), cx, typeof p.file !== "string");
     // Dev/test aid, harmless: props { file } preselects a file (relative to the root, or absolute).
@@ -585,6 +586,7 @@ export default class FilePreview extends View {
       const i = tree.rows().findIndex((r) => r.path === rel);
       if (i >= 0) this.scroll.scroll_to_item(i, "center");
       if (!opts.treeOnly) this.show(rel, cx, opts);
+      if (!opts.treeOnly && !opts.keep) this.toView();
       this.memTouch(cx);
       cx.notify();
     });
@@ -916,6 +918,7 @@ export default class FilePreview extends View {
     this.ts.opened = r.path;
     this.cursor = r.path;
     this.show(r.path, cx);
+    this.toView();
   }
 
   findClick(path, cx) {
@@ -1056,7 +1059,8 @@ export default class FilePreview extends View {
     if (c === "anchor") return this.anchor();
     if (c === "popout") { if (this.mode === "side") this.popOut(); return; }
     // Sent when the side panel opens: it takes the keyboard from the terminal.
-    if (c === "focus-side") { if (this.mode === "side") this.sideFocus().focus(); return; }
+    if (c === "focus-side") { if (this.mode === "side") (this.viewShown() ? this.previewFocus : this.sideFocus()).focus(); return; }
+    if (c === "back") { if (this.viewShown()) this.toList(); return; }
     // Key names as commands (`file-preview.down`), so the tree can be driven without a keyboard.
     if (c === "reload") return this.reload(cx);
     if (c.startsWith("open:")) return this.reveal(c.slice(5), cx);
@@ -1135,8 +1139,8 @@ export default class FilePreview extends View {
       else if (row.depth > 0) this.moveTo(rows, rows.findIndex((r) => r.path === parent(row.path)));
     } else if (k === "enter" || k === "space") {
       if (!row || row.denied) return false;
-      if (row.dir) this.toggle(row.path, cx); else this.show(row.path, cx);
-    } else if (k === "tab") this.previewFocus.focus();
+      if (row.dir) this.toggle(row.path, cx); else { this.show(row.path, cx); this.toView(); }
+    } else if (k === "tab") { if (this.stacked()) this.toView(); else this.previewFocus.focus(); }
     else if (k === "r") this.reload(cx);
     else if (k === "b") this.toggleTree();
     else if (k === "g" && this.git) this.setSide("commits", cx);
@@ -1150,7 +1154,11 @@ export default class FilePreview extends View {
     const m = e.modifiers;
     if (m.platform && !m.control && !m.alt && e.key === "f") { cx.stop_propagation(); this.openFind(where, cx); return; }
     if (m.platform || m.control || m.alt) return;
-    if (e.key === "escape") { if (this.overlay) closeOverlay(this.overlay); return; }
+    if (e.key === "escape") {
+      if (this.overlay) closeOverlay(this.overlay);
+      else if (where === "preview" && this.viewShown()) { cx.stop_propagation(); this.toList(); cx.notify(); }
+      return;
+    }
     if (e.key === "/" || e.key_char === "/") { cx.stop_propagation(); this.openFind(where, cx); return; }
     // n / shift-n: next and previous match block while the document has the keyboard.
     if (where === "preview" && this.ds && (e.key === "n" || e.key === "N")) {
@@ -1162,7 +1170,7 @@ export default class FilePreview extends View {
     if (where === "tree") used = this.treeKey(e.key, cx);
     else if (where === "commits") used = this.commitKey(e.key, cx);
     else if (where === "changes") used = this.changeKey(e.key, cx);
-    else if (e.key === "tab") { this.focusTree(true); used = true; }
+    else if (e.key === "tab") { if (this.stacked()) this.toList(); else this.focusTree(true); used = true; }
     else if (e.key === "backspace" && this.atCommit) { this.commitBack(cx); used = true; }
     else if (e.key === "r") { this.reload(cx); used = true; }
     else if (e.key === "b") { this.toggleTree(); used = true; }
@@ -1177,6 +1185,25 @@ export default class FilePreview extends View {
   // ---- panel ----------------------------------------------------------
 
   narrow() { return this.width !== null && this.width < NARROW; }
+
+  /**
+   * Stacked: the side panel (and an old docked pane) shows one page at a time, the sidebar's
+   * list or what it opened, each at full width; the popup keeps both side by side.
+   */
+  stacked() { return this.mode !== "popup"; }
+  /** Stacked and on what the list opened (while there is something to show). */
+  viewShown() { return this.stacked() && this.page === "view" && Boolean(this.file || this.commit); }
+
+  toView() {
+    if (!this.stacked()) return;
+    this.page = "view";
+    this.previewFocus.focus();
+  }
+
+  toList() {
+    this.page = "list";
+    this.sideFocus().focus();
+  }
   /** The stored choice of this mode, else: shown when wide; when narrow, as the panel started. */
   treeShown() { return this.treePref ?? (!this.narrow() || this.treeOpen); }
 
@@ -1202,7 +1229,7 @@ export default class FilePreview extends View {
     if (w === this.width) return;
     const was = this.treeShown();
     this.width = w;
-    if (was && !this.treeShown() && this.sideFocused()) this.previewFocus.focus();   // its element goes
+    if (!this.stacked() && was && !this.treeShown() && this.sideFocused()) this.previewFocus.focus();   // its element goes
     cx.notify();
   }
 
@@ -1237,7 +1264,7 @@ export default class FilePreview extends View {
     if (!row) return;
     this.cursor = row.path;
     if (row.denied) { cx.notify(); return; }
-    if (row.dir) this.toggle(row.path, cx); else this.show(row.path, cx);
+    if (row.dir) this.toggle(row.path, cx); else { this.show(row.path, cx); this.toView(); }
     cx.notify();
   }
 
@@ -1399,6 +1426,7 @@ export default class FilePreview extends View {
     const ctx = this.ctx;
     if (!ctx) return;
     if (this.atCommit) this.commitBack(cx);
+    this.toView();
     if (this.commit?.hash === hash && !this.commit.error) { cx.notify(); return; }
     this.closeCommitView();
     if (this.ds) this.closeDocFind(false);
@@ -1453,6 +1481,13 @@ export default class FilePreview extends View {
   closeCommitView() {
     for (const f of this.commit?.data?.files ?? []) f.state?.release();
     this.commit = null;
+  }
+
+  /** A commit's or change's ✕: stacked, back to the list it came from (not the file behind it). */
+  closeCommitButton(cx) {
+    this.closeCommitView();
+    if (this.stacked()) this.toList();
+    cx.notify();
   }
 
   /** File n of the shown commit, as of that commit (a deleted one: as of its parent). */
@@ -1549,6 +1584,7 @@ export default class FilePreview extends View {
     const ctx = this.ctx;
     if (!ctx) return;
     if (this.atCommit) this.commitBack(cx);
+    this.toView();
     if (this.commit?.change?.key === row.key && !this.commit.error) { cx.notify(); return; }
     this.closeCommitView();
     if (this.ds) this.closeDocFind(false);
@@ -1608,7 +1644,7 @@ export default class FilePreview extends View {
         .child(div().flex_none().text_size(11.5).text_color(t.ansi1).child(`−${f.del}`)))
       .when(f?.status !== "D", (el) => el.child(h_flex().id("fp-change-open").h(22).px(6).flex_none().rounded(5).items_center().cursor_pointer()
         .hover((s) => s.bg(t.hover)).text_size(12).text_color(t.accent).on_click((_e, cx) => this.openAt(0, cx)).child("Open file")))
-      .child(this.button("fp-change-close", "close.svg", t, (_e, cx) => { this.closeCommitView(); cx.notify(); }));
+      .child(this.button("fp-change-close", "close.svg", t, (_e, cx) => this.closeCommitButton(cx)));
   }
 
   /** The Changes tab: Staged, Unstaged and Untracked, a header each, as one virtual list. */
@@ -1669,7 +1705,8 @@ export default class FilePreview extends View {
     const rows = this.tree.rows(), narrow = this.narrow(), shown = this.treeShown();
     // The Commits tab asks for the history the first time it shows (once per context).
     const ctx = this.ctx;
-    if (shown && this.sideNow() === "commits" && ctx && !ctx.log && !ctx.logWanted && this.tree.root) {
+    const view = this.viewShown(), listed = this.stacked() ? !view : shown;
+    if (listed && this.sideNow() === "commits" && ctx && !ctx.log && !ctx.logWanted && this.tree.root) {
       ctx.logWanted = true;
       cx.spawn(async (cx) => this.loadLog(ctx, cx));
     }
@@ -1681,9 +1718,12 @@ export default class FilePreview extends View {
       .when(this.mode === "side", (el) => el.rounded(10).overflow_hidden().border_1().border_color(t.border))
       .on_size_change((box, cx) => this.sized(box, cx))
       .child(this.topBar(t))
-      .child(h_flex().flex_1().min_h(0)
+      .when(this.stacked(), (el) => el.child(view
+        ? v_flex().flex_1().min_h(0).child(this.backBar(t)).child(this.previewPane(t, narrow))
+        : div().flex_1().min_h(0).child(this.sidePane(rows, t, cx))))
+      .when(!this.stacked(), (el) => el.child(h_flex().flex_1().min_h(0)
         .when(narrow || !shown, (el) => el.child(this.strip(t)))
-        .child(this.split(rows, t, narrow, shown, cx)))
+        .child(this.split(rows, t, narrow, shown, cx))))
       .child(this.statusBar(t));
   }
 
@@ -1709,7 +1749,7 @@ export default class FilePreview extends View {
   topBar(t) {
     const on = this.ctx?.on;
     return h_flex().h(28).flex_none().pl(4).pr(10).gap(6).items_center().border_b(1).border_color(t.border).bg(t.chrome)
-      .child(this.button("fp-tree-bar", "sidebar.svg", t, (_e, cx) => { this.toggleTree(); cx.notify(); }))
+      .when(!this.stacked(), (el) => el.child(this.button("fp-tree-bar", "sidebar.svg", t, (_e, cx) => { this.toggleTree(); cx.notify(); })))
       .child(this.button("fp-find-tree", "search.svg", t, (_e, cx) => this.openTreeFind(cx)))
       .child(div().flex_1().min_w(0).truncate().text_size(12).child(tilde(this.tree.root) || "No folder"))
       .when(Boolean(on), (el) => el.child(div().flex_none().px(6).rounded(4).bg(t.raised).text_size(11)
@@ -1742,6 +1782,17 @@ export default class FilePreview extends View {
       .when(r.denied, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("no access")))
       .when(Boolean(tint) && !r.dir, (el) => el.child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(tint).child(g)))
       .when(Boolean(tint) && r.dir, (el) => el.child(h_flex().w(12).flex_none().justify_center().child(div().size(5).rounded_full().bg(tint))));
+  }
+
+  /** Stacked: over what the list opened, the way back to it. */
+  backBar(t) {
+    const label = { files: "Files", commits: "Commits", changes: "Changes" }[this.sideNow()];
+    const what = this.commitShown() ? null : this.atCommit ? this.atCommit.path : this.file;
+    return h_flex().h(28).flex_none().pl(4).pr(10).gap(8).items_center().border_b(1).border_color(t.border).bg(t.chrome)
+      .child(h_flex().id("fp-back").h(22).px(6).flex_none().gap(4).rounded(5).items_center().cursor_pointer()
+        .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.toList(); cx.notify(); })
+        .text_size(12).text_color(t.accent).child(`← ${label}`))
+      .when(Boolean(what), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(what)));
   }
 
   /** The hidden tree's strip (and a narrow view's), with its toggle. */
@@ -1988,7 +2039,7 @@ export default class FilePreview extends View {
     return v_flex().w_full().flex_none().gap(Math.round(8 * z)).p(Math.round(14 * z)).rounded(8).border_1().border_color(t.border).bg(t.raised)
       .child(h_flex().w_full().gap(8).items_start()
         .child(div().flex_1().min_w(0).text_size(Math.round(16 * z)).font_bold().child(d.subject || "(no subject)"))
-        .child(this.button("fp-commit-close", "close.svg", t, (_e, cx) => { this.closeCommitView(); cx.notify(); })))
+        .child(this.button("fp-commit-close", "close.svg", t, (_e, cx) => this.closeCommitButton(cx))))
       .when(d.refs.length > 0, (el) => el.child(h_flex().w_full().flex_wrap().gap(5).children(d.refs.map((r) => this.refPill(r, t, 240)))))
       .child(v_flex().w_full().gap(4).text_size(Math.round(12.5 * z))
         .child(h_flex().w_full().gap(8).items_center().child(label("Commit"))

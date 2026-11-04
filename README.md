@@ -54,6 +54,10 @@ the window (a Preview button next to Files and Changes) or as a near-full-screen
     Files and Changes panels. The **Preview** button at the top right of the tab bar
     opens and closes it, and the terminals of the tab (all their splits) shrink to make
     room. Drag its left edge to resize it. Which panel is open is remembered per space.
+  - The side panel shows one page at a time, at its full width: the Files, Commits and
+    Changes list, or what you open from it (a file, a commit, a change), with a
+    **← Files** (or Commits, Changes) bar to go back. `Esc` or `Tab` also goes back. The
+    popup keeps the sidebar and the preview side by side.
   - The side panel's expand button turns it into the popup, on the same file. Closing that
     popup (`Esc`, ✕, `cmd-e` or its anchor button) brings the side panel back.
   - Opening the side panel (Preview, `cmd-shift-e`, the popup's anchor) moves the keyboard
@@ -288,8 +292,6 @@ as the popup) and close. An expanded diagram's bar has zoom out, zoom in, fit an
 
 - The side panel shares its column with Files and Changes: one of the three shows at a
   time, at the same width (368 px at first; drag it up to 1,600 px).
-- In a narrow side panel, until you hide or show the tree yourself, it opens with the
-  tree unfolded over the preview, and `b` folds it away.
 - Long lines in a code fence (other than JSON, which wraps) scroll sideways with the
   trackpad, but the fence shows no horizontal scrollbar.
 - An expanded diagram scrolls with the wheel, the trackpad or its scrollbars; there is
