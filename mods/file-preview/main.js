@@ -32,6 +32,7 @@ const MAX_EDITORS = 300;     // fences past this stay in the prose, uncolored
 const MAX_DIAGRAM_W = 600;   // diagram display width cap (logical px), besides the column and half the PNG
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DEBOUNCE = 200, MAX_WAIT = 1000;   // live reload: agents write in bursts
+const COL_W = 1200;                       // reading column cap at 100 % text zoom; scales with it
 const POLL_FILE = 2500, POLL_TREE = 10000;
 const TREE_W = 260, NARROW = 600;   // below NARROW px the tree folds into a strip
 const STRIP_W = 28, NARROW_TREE_W = 220;
@@ -1763,7 +1764,7 @@ export default class FilePreview extends View {
     let shown = 0;
     return v_flex().id(`commit:${d.hash}`).flex_1().min_h(0).overflow_y_scrollbar()
       .child(h_flex().w_full().justify_center().px(narrow ? 12 : 24).py(narrow ? 12 : 20)
-        .child(v_flex().w_full().max_w(980).gap(Math.round(14 * this.textZoom)).text_size(this.proseSize())
+        .child(v_flex().w_full().max_w(Math.round(COL_W * this.textZoom)).gap(Math.round(14 * this.textZoom)).text_size(this.proseSize())
           .child(this.commitHeader(d, t, narrow))
           .child(this.commitFiles(d, t))
           .children(d.files.map((f, i) => { const el = this.diffBlock(f, i, t, shown); shown += f.diff?.lines.length ?? 0; return el; }))
@@ -1931,7 +1932,7 @@ export default class FilePreview extends View {
     else if (doc.kind === "markdown")
       body = v_flex().id(`doc:${this.file}`).flex_1().min_h(0).overflow_y_scrollbar()
         .child(h_flex().w_full().justify_center().px(narrow ? 12 : 24).py(narrow ? 12 : 20)
-          .child(v_flex().id("fp-col").w_full().max_w(860).gap(Math.round(12 * this.textZoom)).text_size(this.proseSize())
+          .child(v_flex().id("fp-col").w_full().max_w(Math.round(COL_W * this.textZoom)).gap(Math.round(12 * this.textZoom)).text_size(this.proseSize())
             .on_size_change((size, cx) => { if (Math.round(size.width) !== this.colW) { this.colW = Math.round(size.width); cx.notify(); } })
             .children(this.blocks.map((b, i) => this.marked(b, t, b.kind === "md"
               ? TextView.markdown(`md-${i}`, b.text).selectable(true).on_link_click((url, cx) => this.link(url, cx))
