@@ -18,21 +18,29 @@ what the docs leave out, all verified on a real build.
     soft-wrapped.
   - Plain text for anything else.
 - **Live reload**, in local and remote spaces.
-- **Commit history** in a Files | Commits sidebar tab: a GitLab-style graph (lanes,
-  merge/fork curves, nodes, ref flags at the node), a commit view (header, files, tinted diff) and
-  files as of a commit through the normal preview.
-- **Git change marks** (VS Code style): status letters and colors in the tree, changed
-  blocks in Markdown, a line gutter (or an overview ruler) in the code view.
-- **Hide/show the tree** at any width (top-bar button, key `b`), remembered per mode.
+- **Commit history** in a Files | Commits | Changes sidebar: a GitLab-style graph (lanes,
+  merge/fork curves, nodes, ref flags at the node) with an All branches | Current branch
+  switch and a Remotes toggle, a commit view (header, files, tinted diff with old and new
+  line numbers) and files as of a commit through the normal preview. Changes lists the
+  uncommitted files (Staged, Unstaged, Untracked) and shows each one's diff.
+- **Git change marks** (VS Code style): status letters and colors in the tree; in the code
+  view an overview ruler on the right, plus a line gutter up to 1,000 lines. Markdown gets
+  no marks.
+- **Hide/show the tree** at any width in the popup (top-bar button, key `b`), remembered.
 - **Reading zoom** (70–200 %): prose, fences, code view and diagrams scale together;
-  keys `+`/`=`, `-`, `0`, top-bar buttons A− / % / A+, remembered per mode.
+  keys `+`/`=`, `-`, `0`, top-bar buttons A− / % / A+; the popup keeps one level, the
+  side panel one per tab.
 - **Expanded diagrams**: an expand button on each diagram; fit, zoom `+`/`-`/`0`, two-axis
   scrolling, and a sharper re-render when zoom would upscale.
 - **Two modes:**
+  - **Side panel** (the default): a block in the right column of `main-fp`, a clone of
+    Herdr's `main` layout, next to Files and Changes. Opened by a **Preview** button in
+    the tab bar (`tabs-fp`, a clone of Herdr's `tabs`) or `cmd-e` →
+    `mod.open:file-preview-panel`, a separate launcher mod. It shows one page at a time:
+    the sidebar's list, or what it opened with a back bar.
   - **Popup:** `mod.json` overlay `{ "kind": "dialog", "width": 0.95, "height": 0.95 }`
-    with `focusable: true`, opened with `cmd-e` → `mod.open:file-preview`.
-  - **Right panel**, at 45 % of the tab: a pane created with `pane.split`, opened with
-    `cmd-shift-e` → `mod.open:file-preview-panel`, a separate launcher mod.
+    with `focusable: true`, opened with `cmd-shift-e` → `mod.open:file-preview`, or from
+    the side panel's expand button (closing it brings the side panel back).
 - **UI text in English.** Use only `theme()` colors. The syntax palette must be hex,
   derived from the theme:
   `{ keyword: ansi5, string: ansi2, comment: dim, function: ansi4, type: ansi3, number: ansi1, constant: ansi6 }`.
@@ -41,8 +49,10 @@ Deliver:
 
 - `mods/file-preview/`
 - `mods/file-preview-panel/`
+- `mods/tabs-fp/` and `layouts/main-fp.json`
 - `keys.json` with both shortcuts under `"global"`
-- `scripts/sync.sh` to copy the mods into `~/.config/herdr-app/mods/`
+- `scripts/sync.sh` to copy the mods into `~/.config/herdr-app/mods/` and the layout into
+  `~/.config/herdr-app/layouts/`
 
 ## Architecture
 
@@ -63,13 +73,16 @@ mods/file-preview/
   memory.js     popup memory per root: { file, expanded } in shared("file-preview.memory"), LRU of 20
   mermaid.js    mmdc + browser lookup, one-at-a-time render queue, .cache/, IHDR size, sizes.json, prune
   zoom.js       Zoom: the expanded diagram (fit, zoom steps, viewport, -s 4 swap) and its keys
-  dock.js       anchor terminal, pane.split + 45 % sizing, panel toggle
+  dock.js       the side panel: is the block in the shown layout, shown, show (+ focus-side), hide, toggle
   icons/*.svg   own icons (folder, folder-open, file, file-md, file-code, chevrons, reload, anchor, close,
                 sidebar, expand, zoom-in, zoom-out, fit, deleted, search, search-doc)
 mods/file-preview-panel/
   mod.json      { place: none, overlay: { kind: popup, width: 1, height: 1, frame: none } }
   main.js       Launcher View: init() { try { toggle() } finally { if (overlay) closeOverlay(overlay) } }
   dock.js       byte-for-byte copy of mods/file-preview/dock.js
+mods/tabs-fp/   Herdr's tabs (0.1.12) plus the Preview button (tooltip with the bound key), per-tab panel width
+layouts/main-fp.json   Herdr's main (0.1.12): tabs block → tabs-fp, panel max 1600, panel-body child
+                "file-preview" { mod: "file-preview", props: { mode: "side" } }
 ```
 
 **Context** works like the shipped `files` mod's `location()`:
@@ -104,7 +117,7 @@ Tree keys:
 | `r` | Reload |
 | `b` | Hide or show the tree (any width) |
 | `/`, `cmd-f` | Open the file search (tree) or the document search (preview) |
-| Esc | Close the popup |
+| Esc | Close the popup (side panel: back to the list) |
 
 Ignore keys that carry platform, control or alt modifiers.
 
@@ -118,8 +131,11 @@ absolute), `expand:<n>` (n-th diagram, from 0), `zoom-in`, `zoom-out`, `zoom-fit
 `find-enter` (open the selected result), `find-close` and `find-esc` (dispatches the Esc
 action down the focus path, as the bound key would), and the history hooks: `tab:files`,
 `tab:commits`, `commits-scope`, `commits-more`, `commit:<row | hash prefix>`,
-`commit-file:<n>`, `commit-back`, `commit-close` and `copy-hash`. Key names (`down`,
-`enter`, …) go to the commit list while the Commits tab shows. These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
+`commit-file:<n>`, `commit-back`, `commit-close`, `copy-hash`, `commits-remotes`,
+`tab:changes`, `change:<n | path>` (n counts files only), and the side panel's `popout`,
+`back` and `focus-side`. Key names (`down`, `enter`, …) go to the commit list while the
+Commits tab shows. Commands reach every open copy (popup and side panel), so guard them
+by mode. These hooks make the mod testable with `herdr-app do` and `herdr-app shot`,
 with no keyboard or pointer automation.
 
 ## Platform gotchas (all learned the hard way)
@@ -241,39 +257,39 @@ with no keyboard or pointer automation.
     resolution and re-request);
   - red (`ansi1`) with the trimmed stderr for a broken diagram, with **Retry**.
 
-### Panel and launcher
+### Side panel and launcher
 
-- **A key binding can't pass `mod`/`props` to `pane.split`**: `command:value` fills only
-  the first argument. The fix is a launcher mod. Its `mod.json` is an invisible popup
-  overlay (`frame: "none"`). Its `init` docks or undocks the panel, then closes its own
-  overlay.
+- **A layout block, not a pane.** A pane made with `pane.split` is one more pane of the
+  tab. The side panel is the stack child `file-preview` of the right column `panel` in a
+  layout (as Herdr's Files and Changes): showing the column shrinks the whole tab block.
+  Herdr's layouts and mods are read-only, so clone them (`layout.clone`, `mod.clone`) and
+  version the clones; the tab bar's buttons are hardcoded in `tabs`, so the clone adds
+  Preview. Show: `layout.select {stack: "panel-body", child}` + `layout.show {id: "panel"}`;
+  hide: `layout.hide`; state: `layout()`'s `hidden` and the stack's `active`. Without the
+  block in the shown layout, fall back to `mod.open` (the popup).
+- **One copy for the window.** The block's mod lives across tabs and spaces, so anything
+  per tab is kept by tab id: the width in `tabs-fp` (`layout.resize {id: "panel", px}` on
+  a tab change, a drag recorded for the shown tab, a 1 s guard while the resize lands,
+  the shown width adopted on the first render), the reading zoom in
+  `shared("file-preview.zoom.side.tabs")`.
+- **A key binding can't look at the layout first**: `command:value` runs one command. The
+  launcher is a mod whose `mod.json` is an invisible popup overlay (`frame: "none"`); its
+  `init` toggles the side panel, then closes its own overlay.
   - Read `props()`, not `init`'s argument, which arrives `undefined`.
   - **Guard `closeOverlay`:** `herdr-app check` runs `init` with no window, so
     `props().overlay` is null, and `closeOverlay(null)` throws.
 - **Mods import only from their own folder**, so `dock.js` is duplicated in both mods.
   Make the sync script refuse to run when the copies differ.
-- **`focused()` in the launcher's `init`** is still the terminal behind it. After
-  `pane.split`, focus moves to the new pane, so pass `cwd`, `on` and the anchor
-  terminal's pane id in `props`.
-- **45 % width:**
-  - The new pane is NOT yet in `panes()` inside the launcher's `init`. The panel sizes
-    itself on its **first `on_size_change`**.
-  - Find its own pane: the `mod === "file-preview"` pane that is `focused`, else the
-    tab's panel.
-  - Sizing: `layout.resize {id: anchorTerminal, weight: 0.5}`, **then**
-    `layout.resize {id: panel, weight: 0.409}`, since `0.5 × 45 / 55 ≈ 0.409`.
-  - Weights are relative between siblings, so an earlier user resize of the terminal
-    skews the result unless you reset the terminal first.
-  - This only gives 45 % when the terminal is alone in its row. No API exposes the
-    split tree.
-- **Narrow panel** (under 600 px, which 45 % usually is): the tree folds to a 28 px
-  strip with a toggle button and key `b`.
-  - When unfolded, the tree is `min(220, 55 % of the width)`.
-  - It starts unfolded, unless `props.file` was passed by the popup's anchor button.
-- **One panel per tab:** a mod can't learn its own pane id or update an existing pane's
-  props. The toggle and ✕ find the tab's panel with
-  `panes().find(p => p.tab === tab && p.mod === "file-preview")`. Anchoring closes it
-  and splits a new one.
+- **Keyboard:** showing the block doesn't focus it. `showSide()` and the Preview button
+  run `file-preview.focus-side`, and the side copy focuses its list or its page.
+- **Popup from the side panel:** `openOverlay({ kind: "dialog", … props: { from: "side",
+  file } })`. Herdr closes a dialog on Esc before the mod sees the key, so the popup shows
+  the side panel again from its `close()` hook (any way it closes).
+- **One page at a time** (the side panel is usually narrow): the list (Files, Commits,
+  Changes) or what it opened, full width, under a `← Files` back bar. Opening a file, a
+  commit or a change goes to the page; the back bar, Esc, Tab and a commit's ✕ go back.
+- **The card look:** Herdr's panels draw their own card (`rounded(10)`, `border_1()`); the
+  block has none.
 - **Follow the terminal, not the mod:** accept a new context only while a **terminal**
   is focused. Ignore focus on this mod's own pane or on other mods; otherwise clicking
   the panel jumps the root to `space.folder`.
@@ -283,18 +299,23 @@ with no keyboard or pointer automation.
 
 ### Tree visibility
 
-- `b` and a sidebar button at the left of the top bar hide or show the tree at any width.
-  Hidden, the tree leaves the same 28 px strip (with a folder button) as a narrow panel.
+- **Resizable sidebar** (popup): `h_resizable(id)` with a `resizable_panel()` for the sidebar
+  (`size`, `size_range(160, width − 240)`, `visible(shown)`) and one for the preview. One
+  group id per layout key (Files, Commits, Changes, narrow) so each keeps its width;
+  `on_resize` stores it in `shared("file-preview.sidebar-width.<mode>.<key>")`.
+- In the popup, `b` and a sidebar button at the left of the top bar hide or show the tree
+  at any width. Hidden, the tree leaves a 28 px strip (with a folder button), as a narrow
+  view does. The side panel has no strip: it shows one page at a time.
 - **`localStorage` is per mod copy**, and every popup is a new copy, so it forgets. Store
   the choice with `setShared("file-preview.tree.<popup|panel>", bool)` (persisted in
   `shared.json`); read it once in `init` so open copies in other tabs don't flip.
-- With nothing stored: shown, except a narrow panel keeps its launch default (shown;
-  folded after the popup's anchor). A stored choice wins at every width.
+- With nothing stored: shown, except a narrow view keeps its launch default. A stored
+  choice wins at every width.
 
 ### Popup memory per root
 
-- Popup only (a copy with `props().overlay`); the panel is long-lived and keeps today's
-  behavior. One shared value, `setShared("file-preview.memory", { entries: { [key]: { file,
+- The popup (a copy with `props().overlay`) and the side panel, which follows the focused
+  terminal from root to root. One shared value, `setShared("file-preview.memory", { entries: { [key]: { file,
   expanded: [...], at } } })`, with `key` = the root (local) or `<machine>:<root>` (remote).
   Keep the 20 most recent roots by `at`; store at most 200 folders, shallowest first (a
   cut then keeps every kept folder's parents). An empty state drops its entry.
@@ -352,6 +373,8 @@ with no keyboard or pointer automation.
 
 - **One level `z`** from `[0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]`. Only the document
   scales: top bar, tree, status bar and fence headers keep their size.
+- **Column:** the Markdown column (and the commit view) caps at `round(1200 × z)` px and
+  centers; full width felt too wide on a big screen, 720 too narrow.
 - **Prose:** `.text_size(round(13 × z))` on the Markdown column. `TextView.markdown`
   inherits it, and its headings, tables and inline code scale with it. Don't use
   `window().set_rem_size()`: it rescales the whole window.
@@ -368,8 +391,9 @@ with no keyboard or pointer automation.
 - **Keys** without modifiers on the tree and preview handlers: `+` or `=` in, `-` out, `0`
   reset. The expanded diagram has its own focus handle and its own `+ − 0`, so the two
   never mix.
-- Persist per mode like the tree: `setShared("file-preview.zoom.<popup|panel>", z)` (`null`
-  at 100 %), read once in `init`. The diagram-mode copy ignores it.
+- Persist: the popup like the tree, `setShared("file-preview.zoom.popup", z)` (`null` at
+  100 %), read once in `init`; the side panel per tab (see Side panel). The diagram-mode
+  copy ignores it.
 
 ### Git change marks
 
@@ -404,14 +428,9 @@ with no keyboard or pointer automation.
   one runs sets a flag and runs once after. An unreachable machine keeps the last
   marks. Re-run the file's diff only when its status letter changes or its content
   reloads; an untracked file needs no exec at all.
-- **Markdown:** `segment()` returns `start`/`end` (source lines from 1, inclusive) for
-  each prose chunk (`chunks()` reports each piece's first line) and fence (with its
-  fence lines). Wrap every block in `v_flex().w_full().relative()` and draw the marks
-  **absolutely in the column's side padding** (`left(-8)`, 3 px wide, `top(0).bottom(0)`):
-  no layout change with or without a repo. Bar color: added `ansi2`, modified or mixed
-  `ansi4`. A deletion after line n goes to the first block ending at or below n: its
-  bottom when n is its last line, else its top; past the last block, the last block's
-  bottom. Deleted-lines marker: a filled triangle SVG (`currentColor`) in `ansi1`.
+- **Markdown: no marks.** Bars per block (prose run, fence, diagram) were tried: a block is
+  too coarse to say which lines changed, and it looked wrong. The Changes tab shows the
+  diff instead.
 - **Code view, line gutter (≤ 1,000 rows):** the Editor scrolls itself and its scroll
   position can't be read, so a sibling gutter can't follow it. Lay it out at full height
   instead (the fence trick): a box of `rows × round(f × 1.618)` with `overflow_hidden()`,
@@ -427,16 +446,17 @@ with no keyboard or pointer automation.
     part (trackpad still scrolls sideways), and keyboard cursor moves don't scroll the
     outer container. So it is used only inside a repo; elsewhere the code view is the
     plain Editor, as before.
-- **Code view, overview ruler (> 1,000 rows, or soft-wrapped JSON):** an 8 px strip right
-  of the Editor with markers at `top: (line − 1) / rows %` and `h: n / rows %`, `min_h(2)`.
-  Markers in the lower half hang from `bottom(%)`, so the 2 px minimum never overflows
-  the strip (a marker at the last row was invisible with `top`).
+- **Code view, overview ruler (every code file in a repo):** a 14 px strip right of the
+  Editor (next to the gutter when there is one) with markers at `top: (line − 1) / rows %`
+  and `h: n / rows %`, `min_h(4)`, rounded; deletions 3 px. Markers in the lower half hang
+  from `bottom(%)`, so the minimum never overflows the strip (a marker at the last row was
+  invisible with `top`). Over 1,000 rows, or soft-wrapped JSON, it is the only mark.
 
 ### Commit history
 
-- **Tabs:** `Files | Commits` over the sidebar, only while the git status says the root is
+- **Tabs:** `Files | Commits | Changes` over the sidebar, only while the git status says the root is
   in a repo (`this.git` non-null). The choice lives in `shared("file-preview.sidebar.<mode>")`
-  ("commits" or null); the effective tab is `side === "commits" && git ? "commits" : "files"`,
+  ("commits", "changes" or null); the effective tab is the stored one while `git`, else "files",
   so a non-repo root shows Files without losing the preference. The commit list has its
   own focus handle; when the tab comes or goes with the repo, move the keyboard with it
   (in the git refresh handler, not in `render`). Wide view: the sidebar grows to
@@ -444,8 +464,11 @@ with no keyboard or pointer automation.
 - **Log:** one `sh -c` (same read-only flags as the status) printing a refs checksum,
   `\1` HEAD `\1` remotes `\1`, then `git log <refs> --topo-order -z
   --format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s --skip=N -n 301`. Refs: `--branches
-  --tags --remotes HEAD`, **not `--all`** (that drags in `refs/stash`); "current branch" is
-  `HEAD`. Ask for one more than the page to know whether there is more. Exit 6 (no
+  --tags --remotes HEAD`, **not `--all`** (that drags in `refs/stash`); without remotes
+  `--branches --tags HEAD`; "current branch" is `HEAD`, with remotes `HEAD @{u}` when
+  `rev-parse -q --verify @{u}` resolves. `%D` still lists remote refs on local commits, so
+  without remotes drop them from `refs` **and recompute the flags** (rows draw the flags).
+  Scope and remotes are remembered in `shared("file-preview.commits.scope|remotes")`. Ask for one more than the page to know whether there is more. Exit 6 (no
   `rev-parse --verify HEAD`) → "No commits yet". `%D`: `HEAD -> x` is the current branch,
   `tag: x` a tag, `<remote>/x` a remote (from `git remote`), `*/HEAD` dropped.
 - **Paging:** `--skip` continues the same topological order, so lanes carry over between
@@ -518,6 +541,16 @@ with no keyboard or pointer automation.
   deleted or hunk-header lines (`ansi2` / `ansi1` with alpha `26`, `ansi4` with `1a`) and
   a 3 px bar for added/deleted runs. EditorStates are made when the commit loads, released
   when it closes, and re-made on a zoom change.
+- **Line numbers** (GitLab style, old and new): count them while splitting the patch (a
+  hunk header resets both counters; context lines advance both, `+` the new, `-` the old).
+  A text with `\n` doesn't break lines (it renders one clipped line), and a `v_flex` of
+  rows next to the Editor came out offset, so each number is an absolute row at
+  `top(i × lh)`, one per non-empty cell; `…` on hunk headers. Not measured at the 3,000-line
+  cap (the per-line divs above cost 43 ms there).
+- **Changes tab:** the status script also returns `{ staged, unstaged, untracked }` entries.
+  A change's diff: staged `diff --cached -M -- :(top)<path> [:(top)<old>]`, unstaged
+  `diff -- :(top)<path>`, untracked `diff --no-index -- /dev/null <path>` (exits 1 when they
+  differ: ignore the code), shown in the commit view's place and refreshed with the status.
 - **File as of a commit:** `git cat-file -e <sha>:<path>` then `git show <sha>:<path> |
   head -c LIMIT+1`, classified like a normal read. The path is from the repo's top (that
   is what `<rev>:<path>` means). A deleted file reads `<sha>^:<path>`. It goes through
@@ -600,7 +633,7 @@ with no keyboard or pointer automation.
 ### Other traps
 
 - **Don't let a callback parameter shadow an import.** An `on_size_change((size) => …)`
-  shadowed the imported `size()` from `dock.js`. The resulting exception also broke the
+  shadowed an imported `size()` (from an earlier `dock.js`). The resulting exception also broke the
   width measurement. Name the parameter `box`.
 - **Install by copying, never by symlink.** With a symlinked mod folder,
   `herdr-app check` passes and the mod runs, but **no `svg("mods/<name>/icons/…")`
@@ -615,7 +648,10 @@ with no keyboard or pointer automation.
   - `herdr-app check` runs `init` headless: `focused()` is null and spawned tasks don't
     finish. Always verify with `herdr-app shot`.
 - **Paths:** the mod hardcodes `mods/file-preview/` for icons and the cache. If you
-  rename the mod, update those paths and the `"file-preview"` mod name in `dock.js`.
+  rename the mod, update those paths, the `"file-preview"` mod name in `dock.js` and
+  `tabs-fp`, and the block in `main-fp.json`.
+- **`herdr-app check` on the repo folder fails** (the manifest's read roots point at the
+  installed copy): sync, then check `~/.config/herdr-app/mods/<name>`.
 
 ## Test fixtures
 

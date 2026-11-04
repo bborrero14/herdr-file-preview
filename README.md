@@ -6,7 +6,7 @@ and Mermaid diagrams, plus syntax-highlighted source files. It works in local an
 spaces, reloads live while agents edit files, and opens as a side panel on the right of
 the window (a Preview button next to Files and Changes) or as a near-full-screen popup.
 
-![file-preview showing a Markdown file with a Mermaid diagram, a code fence and git marks](preview.png)
+![file-preview in the side panel next to a terminal, showing a Markdown file with a Mermaid diagram, a code fence and a table](preview.png)
 
 ## Features
 
@@ -113,11 +113,10 @@ the window (a Preview button next to Files and Changes) or as a near-full-screen
     cleared when you open another file.
 - **Commit history** (GitLab-style graph). Inside a git repository the sidebar has three
   tabs, **Files | Commits | Changes**; the choice is remembered separately for the popup and
-  the panel, and the tabs are hidden outside a repository. Drag the sidebar's edge to resize
-  it: each tab (and the narrow view) keeps its own width, remembered for the popup and the
-  panel.
+  the side panel, and the tabs are hidden outside a repository. In the popup, drag the
+  sidebar's edge to resize it: each tab (and the narrow view) keeps its own width.
 
-  ![The Commits tab: a GitLab-style graph with ref flags and a commit open in the preview](preview-commits.png)
+  ![The popup's Commits tab: the branch switch, Remotes, a GitLab-style graph with ref flags, and a commit's diff with old and new line numbers](preview-commits.png)
 
   - The Commits tab lists `git log --topo-order` of every branch, tag and remote ref plus
     `HEAD` (stashes are left out), 300 commits at a time; the next page loads when you
@@ -261,16 +260,16 @@ Inside the mod:
 | `→` | Expand a folder, or step into it |
 | `←` | Collapse a folder, or go to its parent |
 | `Enter` / `Space` | Open the file, or toggle the folder |
-| `Tab` | Switch focus between the tree and the preview |
+| `Tab` | Switch focus between the tree and the preview (side panel: open the list's page, or go back to it) |
 | `r` | Reload the tree and the file |
 | `/` or `cmd-f` | Find a file (tree focused) or find in the document (preview focused) |
 | `n` / `shift-n` | Next / previous match block while the document search is open (preview focused) |
-| `b` | Hide or show the file tree (remembered separately for the popup and the panel) |
+| `b` | Hide or show the file tree (popup) |
 | `g` | Switch the sidebar from Files to Commits, and from Commits or Changes back to Files (in a git repository) |
 | `Backspace` | Back to the commit from a file shown as of that commit (preview focused) |
-| `+` (or `=`) / `-` | Reading zoom in / out (70 % to 200 %; remembered separately for the popup and the panel) |
+| `+` (or `=`) / `-` | Reading zoom in / out (70 % to 200 %; the popup keeps one level, the side panel one per tab) |
 | `0` | Reading zoom back to 100 % |
-| `Esc` | Close the popup |
+| `Esc` | Close the popup; in the side panel, back to the list from what it opened |
 
 In the Commits and Changes tabs, `↑` `↓` `PageUp` `PageDown` `Home` `End` move the selection
 and `Enter` (or `Space`) shows the selected commit or change; `Tab`, `r`, `b` and `g` work as
@@ -357,7 +356,9 @@ as the popup) and close. An expanded diagram's bar has zoom out, zoom in, fit an
   loaded tree stays visible. Press **Retry** when the machine is back.
 - **Nothing happens, or the mod looks broken:** run `herdr-app status` and look at
   `errors`, then run `herdr-app check ~/.config/herdr-app/mods/file-preview` (and
-  `file-preview-panel`).
+  `file-preview-panel`, `tabs-fp`).
+- **No Preview button in the tab bar:** the shown layout isn't `main-fp`. Switch to it
+  (see Install); without it `cmd-e` opens the popup.
 - **Icons are missing:** the mod folder is probably a symlink. Remove it and install
   with `scripts/sync.sh`.
 
@@ -365,8 +366,10 @@ as the popup) and close. An expanded diagram's bar has zoom out, zoom in, fit an
 
 ```
 mods/file-preview/         the viewer (main.js, tree.js, source.js, markdown.js, lang.js, git.js, commits.js, graph.js, find.js, memory.js, mermaid.js, zoom.js, dock.js, icons/)
-mods/file-preview-panel/   launcher for the right panel (main.js, dock.js copy)
-scripts/sync.sh            install / update into ~/.config/herdr-app/mods/
+mods/file-preview-panel/   launcher for the side panel (main.js, dock.js copy)
+mods/tabs-fp/              Herdr's tab bar (tabs 0.1.12) plus the Preview button and the per-tab panel width
+layouts/main-fp.json       Herdr's main layout (0.1.12) with file-preview in the right panel
+scripts/sync.sh            install / update into ~/.config/herdr-app/mods/ and layouts/
 scripts/make-big-md.sh     generates docs/fixtures/big.md (> 1 MB, not versioned)
 docs/fixtures/             test documents: every language, Mermaid, tables, binary
 keys.json                  shortcut snippet to merge
