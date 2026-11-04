@@ -44,7 +44,7 @@ const ZOOM_KEY = "file-preview.zoom.";   // + "popup" | "panel": the level, pers
 const POLL_GIT = 5000;
 // A full-height Editor lays out every row each frame: ~16 ms at 1000 rows, 45 ms at 2000.
 const FULL_MAX = 1000;       // code files up to this many rows get a line gutter; longer ones, the ruler
-const GUTTER = 8, RULER = 8;
+const GUTTER = 8, RULER = 14;   // RULER: the overview strip of a long file (git changes, search hits)
 const BAR_X = 8;             // a Markdown block's search bar sits this far right of the column
 const FILES_EVERY = 5000;    // an open file search re-lists the root at most this often
 const MEMORY_DELAY = 500;    // the popup stores its per-root state this long after the last change
@@ -2166,8 +2166,8 @@ export default class FilePreview extends View {
       return h_flex().flex_1().min_h(0).size_full().child(box)
         .when(Boolean(this.git), (el) => el.child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
           .when(Boolean(m), (e) => e
-            .children(m.runs.map((r) => at(div().absolute().left(2).w(RULER - 4).h(pct(r.n)).min_h(2).bg(barColor(r.kind, t)), r.from - 1, r.n)))
-            .children(m.dels.map((n) => at(div().absolute().left(1).w(RULER - 2).h(2).bg(t.ansi1), n, 0))))))
+            .children(m.runs.map((r) => at(div().absolute().left(2).w(RULER - 4).h(pct(r.n)).min_h(4).rounded(1).bg(barColor(r.kind, t)), r.from - 1, r.n)))
+            .children(m.dels.map((n) => at(div().absolute().left(1).w(RULER - 2).h(3).rounded(1).bg(t.ansi1), n, 0))))))
         // Search: a strip of its own, so its marks never cover the git ones.
         .when(Boolean(hits), (el) => el.child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
           .children(hits.map((h) => at(div().absolute().left(h.line === cur ? 0 : 2).w(h.line === cur ? RULER : RULER - 4).h(pct(1))
