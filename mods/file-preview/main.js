@@ -1404,11 +1404,23 @@ export default class FilePreview extends View {
       if (!d || d.error) view.error = d?.error ?? `Cannot reach ${ctx.on ?? "git"}`;
       else {
         view.data = d;
-        for (const f of d.files) if (f.diff?.lines.length) { f.runs = this.diffRuns(f.diff.kinds); f.state = this.diffState(f); }
+        for (const f of d.files) if (f.diff?.lines.length) { this.prepDiff(f); }
       }
       cx.notify();
     });
     cx.notify();
+  }
+
+  /** What a file's diff block draws: tints, line numbers and the Editor (made here, never in render). */
+  prepDiff(f) {
+    const d = f.diff, num = (n) => (n ? String(n) : ""), hunk = (k, n) => (k === "h" ? "…" : num(n));
+    f.runs = this.diffRuns(d.kinds);
+    f.nums = {
+      old: d.olds.map((n, i) => hunk(d.kinds[i], n)),
+      now: d.news.map((n, i) => hunk(d.kinds[i], n)),
+      digits: String(Math.max(1, ...d.olds, ...d.news)).length,
+    };
+    f.state = this.diffState(f);
   }
 
   /** Readonly Editor of one file's diff lines (made here, never in render). */
@@ -1569,7 +1581,7 @@ export default class FilePreview extends View {
       else if (old && old.binary === f.binary && (old.diff?.lines.join("\n") ?? "") === (f.diff?.lines.join("\n") ?? "")) Object.assign(old, { add: f.add, del: f.del, status: f.status });
       else {
         old?.state?.release();
-        if (f.diff?.lines.length) { f.runs = this.diffRuns(f.diff.kinds); f.state = this.diffState(f); }
+        if (f.diff?.lines.length) { this.prepDiff(f); }
         view.error = null;
         view.data = { files: [f], truncated: f.truncated };
       }
@@ -2018,10 +2030,18 @@ export default class FilePreview extends View {
     if (!f.state) return f.diff?.cut || before >= hist.MAX_DIFF ? note("Diff not shown: the commit's line limit was reached", t.ansi3) : note("No content changes");
     const n = f.diff.lines.length, text = n * lh, slack = Math.max(text, 3 * lh);
     const color = (k) => (k === "a" ? t.ansi2 : k === "d" ? t.ansi1 : t.ansi4);
+    // Old and new line numbers, GitLab style, each at its line's top (a text never breaks on "\n").
+    const mono = typeof settings().font_family === "string" ? String(settings().font_family) : null;
+    const nw = Math.ceil(f.nums.digits * this.codeFont * 0.62) + 12;
+    const col = (rows) => div().w(nw).h(text).flex_none().relative().text_size(this.codeFont).text_color(t.dim)
+      .when(Boolean(mono), (e) => e.font_family(mono))
+      .children(rows.flatMap((r, i) => (r ? [h_flex().absolute().top(i * lh).left(0).right(6).h(lh).justify_end().child(r)] : [])));
     return box
       .child(div().w_full().h(text + 2 * pad).flex_none().py(pad)
         .child(div().w_full().h(text).overflow_hidden().relative()
-          .child(div().w_full().h(text + slack).flex_none().child(Editor.new(f.state).size_full()))
+          .child(h_flex().w_full().h(text + slack).flex_none().items_start()
+            .child(h_flex().h(text).flex_none().mr(6).border_r(1).border_color(t.border).child(col(f.nums.old)).child(col(f.nums.now)))
+            .child(div().flex_1().min_w(0).h(text + slack).child(Editor.new(f.state).size_full())))
           .children(f.runs.map((r) => div().absolute().left(0).right(0).top(r.from * lh).h(r.n * lh).bg(tint(color(r.kind), r.kind === "h" ? "1a" : "26") ?? t.hover)))
           .children(f.runs.filter((r) => r.kind !== "h").map((r) => div().absolute().left(0).w(3).top(r.from * lh).h(r.n * lh).bg(color(r.kind))))))
       .when(f.diff.cut, (el) => el.child(div().px(10).py(4).border_t(1).border_color(t.border).text_size(11).text_color(t.ansi3).child("Diff truncated")));

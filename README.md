@@ -122,7 +122,8 @@ as a panel docked to the right of the terminal.
     with a copy button, author and email, absolute and relative date, clickable parents,
     the message body rendered as Markdown, the changed files with status letters
     (A/M/D/R) and `+`/`−` counts, and the diff of each file with tinted added, removed
-    and hunk-header lines. Merges show the diff against their first parent.
+    and hunk-header lines, and the old and new line numbers on the left (GitLab style).
+    Merges show the diff against their first parent.
   - Click a changed file (in the list or a diff header) to open it **as of that commit**
     through the normal preview (Markdown, Mermaid, highlighting, zoom), under a banner
     "at <hash> · <path> · <subject> · ← back to commit". A deleted file opens as of the
@@ -136,7 +137,8 @@ as a panel docked to the right of the terminal.
   edited again is in both of the first two), each row with its status letter and folder.
   Click a file, or `Enter` on it, to show its diff in the preview: the index against `HEAD`
   for Staged, the working tree against the index for Unstaged, the whole file as added for
-  Untracked. "Open file" shows the file itself. The list and the open diff refresh with the
+  Untracked; like a commit's diff, it has the old and new line numbers on the left.
+  "Open file" shows the file itself. The list and the open diff refresh with the
   git status (every 5 s and on file changes); a diff whose change is gone says so. Read-only:
   nothing is staged or committed. Works on remote spaces.
 - **Live reload**: the open file and the expanded folders update as files change. Local

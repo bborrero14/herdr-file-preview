@@ -218,15 +218,18 @@ function numstat(s) {
   return out;
 }
 
-/** The patch split per file: [{ lines: string[], kinds: string, binary, cut }], kinds a/d/h/space per line. */
+/**
+ * The patch split per file: [{ lines: string[], kinds: string, olds, news, binary, cut }], kinds a/d/h/space
+ * per line; olds and news the line's number in the old and the new file (0: none, as for a hunk header).
+ */
 function patches(text, cutBytes) {
   const out = [];
-  let cur = null, total = 0;
+  let cur = null, total = 0, old = 0, now = 0;
   const lines = text.split("\n");
   if (cutBytes) lines.pop();   // a partial last line
   for (const l of lines) {
     if (l.startsWith("diff --git ") || l.startsWith("diff --cc ") || l.startsWith("diff --combined ")) {
-      cur = { lines: [], kinds: [], binary: false, cut: false, hunks: false };
+      cur = { lines: [], kinds: [], olds: [], news: [], binary: false, cut: false, hunks: false };
       out.push(cur);
       continue;
     }
@@ -238,8 +241,14 @@ function patches(text, cutBytes) {
     if (l === "\\ No newline at end of file") continue;
     if (cur.lines.length >= MAX_FILE_DIFF || total >= MAX_DIFF) { cur.cut = true; continue; }
     const k = l[0] === "+" ? "a" : l[0] === "-" ? "d" : l.startsWith("@@") ? "h" : " ";
+    if (k === "h") {
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(l);
+      old = m ? Number(m[1]) : 0; now = m ? Number(m[2]) : 0;
+    }
     cur.lines.push(l);
     cur.kinds.push(k);
+    cur.olds.push(k === " " || k === "d" ? old++ : 0);
+    cur.news.push(k === " " || k === "a" ? now++ : 0);
     total++;
   }
   if (cutBytes && cur) cur.cut = true;
