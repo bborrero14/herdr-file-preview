@@ -9,7 +9,7 @@ import { readSource, stamp, LIMIT } from "./source.js";
 import { segment } from "./markdown.js";
 import * as lang from "./lang.js";
 import { Mermaid, fnv1a, cacheKey, themeOf } from "./mermaid.js";
-import { dock, panelOf, size } from "./dock.js";
+import { sideAvailable, showSide, hideSide, panelOf, focusedTab } from "./dock.js";
 import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
 import * as git from "./git.js";
 import { listFiles, rank, occurrences, headings, section, FIND_CONTEXT, FIND_ESCAPE, FIND_OPEN, TREE_CONTEXT, DOC_CONTEXT } from "./find.js";
@@ -36,10 +36,10 @@ const COL_W = 1200;                       // reading column cap at 100 % text zo
 const POLL_FILE = 2500, POLL_TREE = 10000;
 const TREE_W = 260, NARROW = 600;   // below NARROW px the tree folds into a strip
 const STRIP_W = 28, NARROW_TREE_W = 220;
-const TREE_KEY = "file-preview.tree.";   // + "popup" | "panel": the last explicit hide/show, persisted
+const TREE_KEY = "file-preview.tree.";   // + "popup" | "side" | "panel": the last explicit hide/show, persisted
 // Reading zoom of the document (prose, fences, code view, diagrams); never the bars or the tree.
 const LEVELS = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
-const ZOOM_KEY = "file-preview.zoom.";   // + "popup" | "panel": the level, persisted (null at 100 %)
+const ZOOM_KEY = "file-preview.zoom.";   // + "popup" | "side" | "panel": the level, persisted (null at 100 %)
 // Git decorations: status poll, the code view's line gutter and the long file's overview ruler.
 const POLL_GIT = 5000;
 // A full-height Editor lays out every row each frame: ~16 ms at 1000 rows, 45 ms at 2000.
@@ -49,7 +49,7 @@ const BAR_X = 8;             // a Markdown block's search bar sits this far righ
 const FILES_EVERY = 5000;    // an open file search re-lists the root at most this often
 const MEMORY_DELAY = 500;    // the popup stores its per-root state this long after the last change
 // Commit history in the sidebar.
-const SIDE_KEY = "file-preview.sidebar.";   // + "popup" | "panel": "commits" | "changes", or null for files
+const SIDE_KEY = "file-preview.sidebar.";   // + "popup" | "side" | "panel": "commits" | "changes", or null for files
 const CROW = 24;             // commit row height
 const LANE_W = 14, NARROW_LANE_W = 10, MAX_LANES = 10, NARROW_MAX_LANES = 6;
 const COMMITS_W = 460;       // the sidebar's width on the Commits tab, when the view is wide
@@ -136,6 +136,7 @@ export default class FilePreview extends View {
     const p = props() ?? {};
     this.overlay = p.overlay ?? null;
     this.mode = p.mode ?? "popup";
+    this.fromSide = p.from === "side" && Boolean(this.overlay);   // a popup opened from the side panel goes back to it
     this.zoom = null;       // the expanded diagram (Zoom), if any
     this.blocks = [];       // [{ kind: "md", text } | { kind: "code", info, lines, state }]
     this.zoomFocus = cx.focus_handle();
@@ -185,11 +186,11 @@ export default class FilePreview extends View {
     this.treeOpen = typeof p.file !== "string";
     const pref = shared(TREE_KEY + this.mode);
     this.treePref = typeof pref === "boolean" ? pref : null;   // an explicit toggle wins over the defaults
-    this.resize = typeof p.resize === "number" ? { anchor: p.anchor ?? null } : null;   // a launcher's 45 %, applied once
     this.mermaid = new Mermaid();
     cx.spawn(async () => { await this.mermaid.prune(); });
-    // Only the popup remembers its file and folders per root; the panel stays put anyway.
-    this.remembers = this.mode === "popup" && Boolean(this.overlay);
+    // The popup and the side panel (it follows the focused terminal from root to root) remember
+    // their file and folders per root; a docked pane stays put anyway.
+    this.remembers = this.mode === "side" || (this.mode === "popup" && Boolean(this.overlay));
     const first = initial(p);
     this.start(first, ctxKey(first), cx, typeof p.file !== "string");
     // Dev/test aid, harmless: props { file } preselects a file (relative to the root, or absolute).
@@ -222,6 +223,8 @@ export default class FilePreview extends View {
 
   async close() {
     this.memFlush();
+    // However it closes (Esc, ✕, cmd-e, the anchor), the side panel it came from shows again.
+    if (this.fromSide && !this.closed) { try { showSide(); } catch {} }
     this.closed = true;
     if (this.zoom) this.zoom.closed = true;
     this.zoomFocus?.release();
@@ -800,7 +803,7 @@ export default class FilePreview extends View {
     const d = { key: b.key, source: b.text, theme: themeOf(this.dark), path: b.d.path, w: b.d.w, h: b.d.h };
     const label = `${this.file} · diagram ${n + 1} of ${list.length}`;
     // A window overlay would draw under this popup's dialog, so the popup draws its own layer.
-    if (this.mode === "panel") openOverlay({ kind: "dialog", width: 0.95, height: 0.95, mod: "file-preview", props: { mode: "diagram", diagram: d, label } });
+    if (!this.overlay) openOverlay({ kind: "dialog", width: 0.95, height: 0.95, mod: "file-preview", props: { mode: "diagram", diagram: d, label } });
     else { this.zoom = new Zoom(d, this.mermaid, label); this.zoomFocus.focus(); }
     cx.notify();
   }
@@ -1051,6 +1054,9 @@ export default class FilePreview extends View {
   command(c, cx) {
     if (c === "focus") return this.focusTree();
     if (c === "anchor") return this.anchor();
+    if (c === "popout") { if (this.mode === "side") this.popOut(); return; }
+    // Sent when the side panel opens: it takes the keyboard from the terminal.
+    if (c === "focus-side") { if (this.mode === "side") this.sideFocus().focus(); return; }
     // Key names as commands (`file-preview.down`), so the tree can be driven without a keyboard.
     if (c === "reload") return this.reload(cx);
     if (c.startsWith("open:")) return this.reveal(c.slice(5), cx);
@@ -1192,12 +1198,6 @@ export default class FilePreview extends View {
   }
 
   sized(box, cx) {
-    if (this.resize !== null) {
-      // Focus moves to a freshly split pane, so it's this one; else this tab's panel.
-      const f = focused(), mine = panes().find((p) => p.mod === "file-preview" && p.focused) ?? (f && panelOf(f.tab));
-      if (mine) size(mine.pane, this.resize.anchor);
-      this.resize = null;
-    }
     const w = Math.round(box.width);
     if (w === this.width) return;
     const was = this.treeShown();
@@ -1206,20 +1206,28 @@ export default class FilePreview extends View {
     cx.notify();
   }
 
-  /** Popup ⇥: the same panel as the launcher, on this root and file; then the popup goes. */
+  /** Popup ⇥: the side panel (as the launcher opens it), showing this file; then the popup goes. */
   anchor() {
-    if (!this.overlay) return;
-    const f = focused(), open = f && panelOf(f.tab);
-    if (open) run("pane.close", { pane: open.pane });   // one panel per tab: the new one replaces it
+    if (!this.overlay || !sideAvailable()) return;
     const file = this.memFile();
-    dock({ cwd: this.tree.root || this.ctx?.cwd || null, on: this.ctx?.on ?? null, ...(file ? { file: this.tree.abs(file) } : {}) });
     closeOverlay(this.overlay);
+    showSide();
+    if (file) run(`file-preview.open:${this.tree.abs(file)}`);
   }
 
-  /** ✕: the popup closes its overlay; the panel, its pane. */
+  /** Side panel ⤢: the popup in its place, on this file; closing it brings the side panel back. */
+  popOut() {
+    const file = this.memFile();
+    hideSide();
+    openOverlay({ kind: "dialog", width: 0.95, height: 0.95, mod: "file-preview",
+      props: { mode: "popup", from: "side", ...(file ? { file: this.tree.abs(file) } : {}) } });
+  }
+
+  /** ✕: the popup closes its overlay; the side panel hides; an old docked pane closes. */
   closeView() {
     if (this.overlay) return closeOverlay(this.overlay);
-    const mine = panelOf(focused()?.tab);
+    if (this.mode === "side") return hideSide();
+    const mine = panelOf(focusedTab());
     if (mine) run("pane.close", { pane: mine.pane });
   }
 
@@ -1669,6 +1677,8 @@ export default class FilePreview extends View {
     // (no occlusion API), and the EditorStates stay retained for the way back.
     if (this.zoom) return v_flex().id("fp-root").size_full().min_h(0).on_size_change((box, cx) => this.sized(box, cx)).child(this.zoomLayer(t));
     return v_flex().id("fp-root").size_full().min_h(0).bg(t.surface).text_color(t.foreground).text_size(13)
+      // The side panel is a card like Herdr's Files and Changes panels next to it.
+      .when(this.mode === "side", (el) => el.rounded(10).overflow_hidden().border_1().border_color(t.border))
       .on_size_change((box, cx) => this.sized(box, cx))
       .child(this.topBar(t))
       .child(h_flex().flex_1().min_h(0)
@@ -1712,7 +1722,8 @@ export default class FilePreview extends View {
         .child(`${Math.round(this.textZoom * 100)}%`))
       .child(this.textButton("fp-text-in", "A+", t, (_e, cx) => this.textAct("in", cx)))
       .child(this.button("fp-reload", "reload.svg", t, (_e, cx) => this.reload(cx)))
-      .when(Boolean(this.overlay), (el) => el.child(this.button("fp-anchor", "anchor.svg", t, () => this.anchor())))
+      .when(Boolean(this.overlay) && sideAvailable(), (el) => el.child(this.button("fp-anchor", "anchor.svg", t, () => this.anchor())))
+      .when(this.mode === "side", (el) => el.child(this.button("fp-popout", "expand.svg", t, () => this.popOut())))
       .child(this.button("fp-close", "close.svg", t, () => this.closeView()));
   }
 

@@ -1,9 +1,10 @@
 #!/bin/sh
-# Copies the repo's mods/ into Herdr (~/.config/herdr-app/mods/, or $HERDR_APP_HOME/mods/).
+# Copies the repo's mods/ and layouts/ into Herdr (~/.config/herdr-app/, or $HERDR_APP_HOME/).
 # Herdr hot-reloads every copy on save, so run this after each edit (or under `fswatch`).
 set -eu
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-dest="${HERDR_APP_HOME:-$HOME/.config/herdr-app}/mods"
+home="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
+dest="$home/mods"
 # Mods import only from their own folder: the launcher carries a copy of the popup's dock.js.
 if ! cmp -s "$repo/mods/file-preview/dock.js" "$repo/mods/file-preview-panel/dock.js"; then
   echo "dock.js differs: cp mods/file-preview/dock.js mods/file-preview-panel/" >&2
@@ -16,4 +17,11 @@ for mod in "$repo"/mods/*/; do
   # .cache/ (Mermaid renders) and jsconfig.json belong to the installed copy, not the repo.
   rsync -a --delete --exclude .cache/ --exclude jsconfig.json --exclude gpui-kit.d.ts "$mod" "$dest/$name/"
   echo "synced $name -> $dest/$name"
+done
+# main-fp: Herdr's main layout with file-preview in the side panel and the tabs-fp bar.
+# A layout file is live: Herdr follows an edit within a second (switch to it with
+# `herdr-app do layout.switch '{"name":"main-fp"}'`).
+for layout in "$repo"/layouts/*.json; do
+  cp "$layout" "$home/layouts/"
+  echo "synced $(basename "$layout") -> $home/layouts/"
 done

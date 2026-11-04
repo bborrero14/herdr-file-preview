@@ -3,8 +3,8 @@
 A [Herdr](https://herdr.dev) mod that shows a file tree of the focused terminal's folder
 next to a rendered preview of the selected file: Markdown with highlighted code fences
 and Mermaid diagrams, plus syntax-highlighted source files. It works in local and remote
-spaces, reloads live while agents edit files, and opens as a near-full-screen popup or
-as a panel docked to the right of the terminal.
+spaces, reloads live while agents edit files, and opens as a side panel on the right of
+the window (a Preview button next to Files and Changes) or as a near-full-screen popup.
 
 ![file-preview showing a Markdown file with a Mermaid diagram, a code fence and git marks](preview.png)
 
@@ -30,28 +30,34 @@ as a panel docked to the right of the terminal.
   fitted to the whole view, with zoom (`+`, `-`, `0` for fit), the zoom level and
   scrollbars on both axes. Zooming past the cached image's resolution renders a sharper
   copy (at twice the pixels) in the background and swaps it in. In the popup it covers
-  the popup; from the panel it opens as a dialog over the window.
+  the popup; from the side panel it opens as a dialog over the window.
 - **Reading zoom** from 70 % to 200 %: one level scales the Markdown prose (headings,
   tables and inline code too), code fences, the code view and diagrams together; the bars
   and the tree keep their size. Use `+` / `-` / `0`, or **A−** / **A+** in the top bar
-  (click the percentage to reset). The popup and the panel each remember their level.
-- **The popup remembers each folder.** Per root folder (and machine), it keeps the open
-  file and the expanded folders, and brings them back the next time the popup opens on
-  that root, also after a Herdr restart: the folders reopen, the file shows again and the
+  (click the percentage to reset). The popup and the side panel each remember their level.
+- **The popup and the side panel remember each folder.** Per root folder (and machine),
+  they keep the open file and the expanded folders, and bring them back the next time they
+  show that root, also after a Herdr restart: the folders reopen, the file shows again and the
   tree's cursor sits on it, scrolled into view. A file or folder that no longer exists is
   skipped, and a root seen for the first time starts clean. When the root follows the
   terminal while the popup is open, the old root's state is saved and the new one's
   restored. The last 20 roots are kept (up to 200 expanded folders each), in the
-  `file-preview.memory` shared value. The panel doesn't use it: it stays open anyway.
+  `file-preview.memory` shared value.
 - **Hide the file tree** at any width with the sidebar button at the top left or `b`.
-  The popup and the panel each remember the choice.
+  The popup and the side panel each remember the choice.
 - **Code view** with syntax highlighting for JavaScript/TypeScript, Bash/sh/zsh, Python,
   C, Go, JSON (also jsonc, jsonl, ndjson, json5, geojson) and YAML (also yml, and TOML
   as an approximation). JSON is always soft-wrapped, so minified one-line files are
   readable. Other text files are shown as plain text.
-- **Two modes**: a popup that covers 95 % of the window, and a right panel that takes
-  45 % of the tab. The popup's anchor button turns it into a panel that keeps the
-  current file open.
+- **Two modes**: a side panel and a popup that covers 95 % of the window.
+  - The side panel is the right column of the `main-fp` layout, the same one as Herdr's
+    Files and Changes panels. The **Preview** button at the top right of the tab bar
+    opens and closes it, and the terminals of the tab (all their splits) shrink to make
+    room. Drag its left edge to resize it. Which panel is open is remembered per space.
+  - The side panel's expand button turns it into the popup, on the same file. Closing that
+    popup (`Esc`, ✕, `cmd-e` or its anchor button) brings the side panel back.
+  - Opening the side panel (Preview, `cmd-shift-e`, the popup's anchor) moves the keyboard
+    to it, so its keys work without a click.
 - **Remote spaces**: the tree, file reads and live reload all work on remote Unix
   machines. Diagrams are always rendered on the local machine.
 - **Git changes, VS Code style.** Inside a git repository (local or remote), the tree
@@ -197,11 +203,23 @@ As the herdr.dev guidance asks, here is what the mod does outside its own folder
    scripts/sync.sh     # rsync mods/* -> ~/.config/herdr-app/mods/ (or $HERDR_APP_HOME/mods/)
    ```
 
-   This installs two mods: `file-preview` (the viewer) and `file-preview-panel` (a tiny
-   launcher that docks the viewer as a right panel). The script removes any old symlink
-   first. It also refuses to run if the two copies of `dock.js` differ.
+   This installs three mods and a layout: `file-preview` (the viewer),
+   `file-preview-panel` (a tiny launcher that opens or closes the side panel), `tabs-fp`
+   and `layouts/main-fp.json`. The script removes any old symlink first. It also refuses
+   to run if the two copies of `dock.js` differ.
 
-2. Merge the shortcuts from [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json`:
+2. Switch to the `main-fp` layout (Settings, or the command below). It is a clone of
+   Herdr's `main` layout (0.1.12) with file-preview added to the right panel, and its tab
+   bar is `tabs-fp`, a clone of Herdr's `tabs` with the Preview button. Herdr's own
+   layouts and mods are read-only, so the clones are the only way to add the button.
+   They don't get Herdr's updates of `main` and `tabs`. Without `main-fp`, `cmd-shift-e`
+   opens the popup instead.
+
+   ```sh
+   herdr-app do layout.switch '{"name":"main-fp"}'
+   ```
+
+3. Merge the shortcuts from [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json`:
 
    ```json
    {
@@ -212,15 +230,15 @@ As the herdr.dev guidance asks, here is what the mod does outside its own folder
    }
    ```
 
-3. Optional: run `herdr-app check ~/.config/herdr-app/mods/file-preview` and
-   `herdr-app check ~/.config/herdr-app/mods/file-preview-panel`.
+4. Optional: run `herdr-app check` on `~/.config/herdr-app/mods/file-preview`,
+   `file-preview-panel` and `tabs-fp`.
 
 ## Shortcuts
 
 | Key | Action |
 |---|---|
 | `cmd-e` | Open or close the popup |
-| `cmd-shift-e` | Open or close the right panel of the current tab |
+| `cmd-shift-e` | Open or close the side panel |
 
 Inside the mod:
 
@@ -263,18 +281,15 @@ In an expanded diagram:
 | `Esc` | Close the expanded diagram (the popup stays open) |
 
 The top bar also has buttons for the tree, file search, document search, reading zoom (A−, the percentage, A+),
-reload, anchor (popup only: dock as a panel)
-and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
+reload, anchor (popup only: back to the side panel), expand (side panel only: open
+as the popup) and close. An expanded diagram's bar has zoom out, zoom in, fit and close.
 
 ## Limitations
 
-- The panel takes **45 % of the tab only when the terminal is alone in its row**. If the
-  terminal already shares a row with other panes, the panel joins that row and gets a
-  smaller share. Herdr has no API that exposes the tab's split tree.
-- **One panel per tab.** Anchoring from the popup replaces the tab's existing panel.
-- At 45 % on a laptop screen the panel is usually under 600 px wide. Until you hide or
-  show the tree yourself, it then opens with the tree unfolded over the preview (folded
-  after the popup's anchor button), and `b` folds it away.
+- The side panel shares its column with Files and Changes: one of the three shows at a
+  time, at the same width (368 px at first; drag it up to 1,600 px).
+- In a narrow side panel, until you hide or show the tree yourself, it opens with the
+  tree unfolded over the preview, and `b` folds it away.
 - Long lines in a code fence (other than JSON, which wraps) scroll sideways with the
   trackpad, but the fence shows no horizontal scrollbar.
 - An expanded diagram scrolls with the wheel, the trackpad or its scrollbars; there is

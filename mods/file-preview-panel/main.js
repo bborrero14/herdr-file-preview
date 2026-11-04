@@ -1,5 +1,5 @@
-// Launcher: toggles file-preview as a right panel of the current tab, sized to 45 %.
-// A keys.json binding can't pass pane.split its mod and props, so this lives for one init.
+// Launcher: toggles file-preview in the layout's side panel (the popup where the layout has none).
+// A keys.json binding runs one command, and this needs to look at the layout first, so it lives for one init.
 import { View, div } from "gpui-kit";
 import { props, closeOverlay } from "herdr";
 import { toggle } from "./dock.js";
