@@ -69,7 +69,7 @@ mods/file-preview/
   commits.js    read-only history: paged git log, refs checksum, lane assignment (Graph), git show of one
                 commit (name-status, numstat, patch, caps), a file at a revision, date formats
   graph.js      one graph cell per commit row: PathBuilder strokes per lane color, the node, the ref-flag pointer (pure)
-  find.js       file list (git ls-files or find) + fuzzy ranking; document matches, headings; key contexts
+  find.js       file list (git ls-files or find) + fuzzy ranking; document matches, Markdown match highlights, headings; key contexts
   memory.js     popup memory per root: { file, expanded } in shared("file-preview.memory"), LRU of 20
   mermaid.js    mmdc + browser lookup, one-at-a-time render queue, .cache/, IHDR size, sizes.json, prune
   zoom.js       Zoom: the expanded diagram (fit, zoom steps, viewport, -s 4 swap) and its keys
@@ -564,11 +564,25 @@ with no keyboard or pointer automation.
 
 - **Scope.** The document's scroll can't be set from script (only virtual lists scroll),
   so document search **marks and counts** matches and reports where the current one is
-  (block or line number, line, section heading). It doesn't scroll.
-- **No text highlighting.** `EditorState` exposes only `value`, `set_value`, `on` and
-  `release`: no selection, range or find API. `TextView` has none either. `InputState`
-  has `set_selected_range`, but that's the search field itself. Mark blocks and rows
-  instead:
+  (match or line number, line, section heading). It doesn't scroll.
+- **Highlighting.** `EditorState` exposes only `value`, `set_value`, `on` and
+  `release`: no selection, range or find API. `InputState` has `set_selected_range`, but
+  that's the search field itself. `TextView.markdown` does draw inline
+  `<mark color="#rrggbb">…</mark>`, so prose matches are highlighted by rendering a copy of
+  the block's text with each match wrapped (`b.text` stays as loaded):
+  - `syntaxMask` (find.js) flags what isn't plain prose: line-start structure (`#`, `>`,
+    list markers, task boxes), thematic breaks, setext underlines, table delimiter rows,
+    reference definitions, code spans, link and image destinations, `[label]` references,
+    autolinks, bare URLs, raw HTML, comments, entities and backslash escapes. A match is
+    wrapped only when it is all plain, has no `` \`*_~[]<>&| `` or newline, and doesn't sit
+    against intraword emphasis (`a**foo**b`). `TextView` misplaces a mark in a centered or
+    right-aligned table cell, so those cells get none.
+  - Colors: opaque blends of `t.accent` over `t.surface` (0.28, current match 0.6); the
+    text keeps the normal foreground.
+  - Navigation is per match (`ds.hits`: one per match, with its block and index there);
+    the marked text is cached on `b.find` and rebuilt only when the current match changes,
+    and `runDoc` makes a new `b.find` on every query change and load.
+  - Besides the `<mark>`s, blocks and rows get marks of their own:
   - Markdown block: a 3 px `t.accent` bar at `right(-8)` in the column's right padding
     (git bars sit at `left(-8)`, so they never collide). The current block gets a 5 px bar
     and a 1 px accent frame at `inset(-4)`.

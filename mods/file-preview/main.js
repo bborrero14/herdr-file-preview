@@ -12,7 +12,7 @@ import { Mermaid, fnv1a, cacheKey, themeOf } from "./mermaid.js";
 import { sideAvailable, showSide, hideSide, panelOf, focusedTab } from "./dock.js";
 import { Zoom, zoomKey, ZOOM_CONTEXT, ZOOM_ESCAPE } from "./zoom.js";
 import * as git from "./git.js";
-import { listFiles, rank, occurrences, headings, section, FIND_CONTEXT, FIND_ESCAPE, FIND_OPEN, TREE_CONTEXT, DOC_CONTEXT } from "./find.js";
+import { listFiles, rank, occurrences, positions, markMatches, syntaxMask, headings, section, FIND_CONTEXT, FIND_ESCAPE, FIND_OPEN, TREE_CONTEXT, DOC_CONTEXT } from "./find.js";
 import { rootKey, recall, snapshot, remember, forget } from "./memory.js";
 import * as hist from "./commits.js";
 import { cell, reach, pointer, palette } from "./graph.js";
@@ -147,6 +147,14 @@ const gitColor = (g, t) => (g === "!" ? t.ansi1 : g === "M" ? t.ansi3 : t.ansi2)
 const barColor = (kind, t) => (kind === "a" ? t.ansi2 : t.ansi4);
 /** A theme color with an alpha byte ("#rrggbb" only), else null. */
 const tint = (c, a) => (typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c + a : null);
+/** `a` laid over `b` at weight w, opaque (#rrggbb), or null when either isn't #rrggbb. */
+function blend(a, b, w) {
+  const hex = /^#[0-9a-f]{6}$/i;
+  if (typeof a !== "string" || typeof b !== "string" || !hex.test(a) || !hex.test(b)) return null;
+  let out = "#";
+  for (let i = 1; i < 7; i += 2) out += Math.round(w * parseInt(a.slice(i, i + 2), 16) + (1 - w) * parseInt(b.slice(i, i + 2), 16)).toString(16).padStart(2, "0");
+  return out;
+}
 const matches = (n) => `${n.toLocaleString("en-US")} match${n === 1 ? "" : "es"}`;
 
 function syntax() {
@@ -189,7 +197,7 @@ export default class FilePreview extends View {
     this.atCommit = null;   // a file shown as of a commit: { hash, short, subject, path, kept }
     this.findScroll = VirtualListScrollHandle.new();
     this.ts = null;         // file search of the tree: { input, query, results, total, at, ... }
-    this.ds = null;         // search in the shown document: { input, query, hits, total, at, heads }
+    this.ds = null;         // search in the shown document: { input, query, hits, total, blocks, at, heads }
     this.inInput = false;   // the key on its way up came from a search field
     this.cursor = null;     // keyboard row (rel path)
     this.file = null;       // shown file (rel path)
@@ -974,13 +982,17 @@ export default class FilePreview extends View {
     cx.notify();
   }
 
-  /** Search in the shown document: marks the blocks (or lines) with matches; it can't scroll to them. */
+  /**
+   * Search in the shown document. Markdown: each match in prose gets a <mark> (the current one
+   * stronger), blocks with matches a bar, the current block a frame; ↑ ↓ go match by match.
+   * Code files: lines are tinted, ↑ ↓ go line by line. It can't scroll to them.
+   */
   openDocFind(cx) {
     const doc = this.doc;
     if (!this.file || !doc || (doc.kind !== "markdown" && doc.kind !== "text") || this.commitShown()) { this.note = "Nothing to search"; cx?.notify(); return; }
     if (!this.ds) {
       const input = InputState.new({ placeholder: "Find in document…" });
-      const ds = this.ds = { input, query: "", hits: [], total: 0, at: 0, heads: [] };
+      const ds = this.ds = { input, query: "", hits: [], total: 0, blocks: 0, at: 0, heads: [] };
       input.on("change", (_e, cx) => { if (this.ds === ds && input.value() !== ds.query) this.docQuery(input.value(), cx); });
       input.on("submit", (e, cx) => { if (this.ds === ds) { this.docStep(e?.shift ? -1 : 1); cx.notify(); } });
     }
@@ -992,7 +1004,7 @@ export default class FilePreview extends View {
     const ds = this.ds;
     if (!ds) return;
     this.ds = null;
-    for (const b of this.blocks) b.find = null;
+    for (const b of this.blocks) b.find = null;   // also drops the marked text
     ds.input.release();
     if (focus) this.previewFocus.focus();
   }
@@ -1008,13 +1020,14 @@ export default class FilePreview extends View {
 
   /**
    * Matches of the query in the document's source (case-insensitive): per line in a code file,
-   * per block in Markdown. Run again after every load, so a live reload keeps the search.
+   * one hit per match in Markdown (b.find.at: their offsets in b.text). Run again after every
+   * load, so a live reload keeps the search; a new b.find also drops the cached marked text.
    */
   runDoc() {
     for (const b of this.blocks) b.find = null;
     const ds = this.ds, doc = this.doc;
     if (!ds) return;
-    ds.hits = []; ds.total = 0;
+    ds.hits = []; ds.total = 0; ds.blocks = 0;
     const q = ds.query.toLowerCase();
     if (!q || !doc) return;
     if (doc.kind === "text") {
@@ -1024,37 +1037,59 @@ export default class FilePreview extends View {
     } else if (doc.kind === "markdown") {
       ds.heads = headings(this.blocks);
       for (const b of this.blocks) {
-        const o = occurrences(b.text, q);
-        if (!o.total) continue;
+        const at = positions(b.text, q);
+        if (!at.length) continue;
         // A fence's text starts under its opening line; a prose chunk at its first line.
         const first = b.kind === "md" ? b.start : b.start + 1;
-        b.find = { n: o.total, rows: o.lines.map((l) => l.line), current: false };
-        ds.hits.push({ block: b, line: first + o.lines[0].line, n: o.total });
-        ds.total += o.total;
+        b.find = { n: at.length, rows: [...new Set(at.map((p) => p.line))], at, k: -1, current: false, md: null, mdKey: null };
+        at.forEach((p, k) => ds.hits.push({ block: b, line: first + p.line, k }));
+        ds.total += at.length;
+        ds.blocks++;
       }
     }
     ds.at = Math.max(0, Math.min(ds.hits.length - 1, ds.at));
-    const cur = ds.hits[ds.at]?.block;
-    if (cur) cur.find.current = true;
+    this.docCurrent(true);
   }
 
-  /** Next (1) or previous (-1) block or line with matches, wrapping around. */
+  /** Flags (on) or clears the current hit on its block: b.find.k is its index there. */
+  docCurrent(on) {
+    const h = this.ds?.hits[this.ds.at], f = h?.block?.find;
+    if (!f) return;
+    f.current = on;
+    f.k = on ? h.k : -1;
+  }
+
+  /** Next (1) or previous (-1) match (a line in a code file), wrapping around. */
   docStep(d) {
     const ds = this.ds, n = ds?.hits.length;
     if (!n) return;
-    const old = ds.hits[ds.at]?.block;
-    if (old) old.find.current = false;
+    this.docCurrent(false);
     ds.at = (ds.at + d + n) % n;
-    const cur = ds.hits[ds.at].block;
-    if (cur) cur.find.current = true;
+    this.docCurrent(true);
   }
 
-  /** "block 3 of 7 · line 120 · Heading": where the current match is, since the view can't go there. */
+  /**
+   * A prose block's Markdown with its matches in <mark> (b.text itself stays as loaded, for
+   * search, copy and reload). Cached on b.find, rebuilt when the current match or theme changes.
+   */
+  markedText(b, t) {
+    const f = b.find;
+    if (!f || !this.ds) return b.text;
+    const soft = blend(t.accent, t.surface, 0.28) ?? "#fef08a", strong = blend(t.accent, t.surface, 0.6) ?? "#fbbf24";
+    const key = `${f.k}|${soft}|${strong}`;
+    if (f.mdKey !== key) {
+      f.md = markMatches(b.text, f.at, this.ds.query.toLowerCase().length, (k) => (k === f.k ? strong : soft), f.mask ??= syntaxMask(b.text)).text;
+      f.mdKey = key;
+    }
+    return f.md;
+  }
+
+  /** "match 3 of 12 · line 120 · Heading" (code: "line 2 of 5 · line 120"): where the current match is, since the view can't go there. */
   docWhere() {
     const ds = this.ds, h = ds?.hits[ds.at];
     if (!h) return null;
-    const what = this.doc?.kind === "text" ? "line" : "block";
-    const sec = what === "block" ? section(ds.heads, h.line) : null;
+    const what = this.doc?.kind === "text" ? "line" : "match";
+    const sec = what === "match" ? section(ds.heads, h.line) : null;
     return `${what} ${ds.at + 1} of ${ds.hits.length} · line ${h.line}` + (sec ? ` · ${sec.text}` : "");
   }
 
@@ -1203,7 +1238,7 @@ export default class FilePreview extends View {
       return;
     }
     if (e.key === "/" || e.key_char === "/") { cx.stop_propagation(); this.openFind(where, cx); return; }
-    // n / shift-n: next and previous match block while the document has the keyboard.
+    // n / shift-n: next and previous match (line, in a code file) while the document has the keyboard.
     if (where === "preview" && this.ds && (e.key === "n" || e.key === "N")) {
       cx.stop_propagation(); this.docStep(m.shift || e.key === "N" ? -1 : 1); cx.notify(); return;
     }
@@ -1892,8 +1927,8 @@ export default class FilePreview extends View {
     const close = (cx) => { if (side === "tree") this.closeTreeFind(cx); else { this.closeDocFind(); cx.notify(); } };
     let info = null;
     if (side === "doc" && st.query) {
-      const where = this.doc?.kind === "text" ? "line" : "block";
-      info = st.total ? `${matches(st.total)} in ${plural(st.hits.length, where)}` : "No matches";
+      const text = this.doc?.kind === "text";
+      info = st.total ? `${matches(st.total)} in ${plural(text ? st.hits.length : st.blocks, text ? "line" : "block")}` : "No matches";
     }
     return h_flex().id(`fp-find-${side}`).h(32).flex_none().w_full().pl(8).pr(4).gap(4).items_center().border_b(1).border_color(t.border).bg(t.chrome)
       .key_context(FIND_CONTEXT).on_action(FIND_ESCAPE, (_e, cx) => close(cx))
@@ -2227,7 +2262,7 @@ export default class FilePreview extends View {
         .child(div().w_full().h(text).overflow_hidden().relative()
           .child(div().w_full().h(text + slack).flex_none().child(Editor.new(b.state).size_full()))
           // Rows with matches, when rows are lines (no soft wrap).
-          .when(Boolean(b.find) && !b.wrap, (e) => e.children(this.lineMarks(b.find.rows, lh, b.find.current, t)))));
+          .when(Boolean(b.find) && !b.wrap, (e) => e.children(this.lineMarks(b.find.rows, lh, t, b.find.current ? b.find.at[b.find.k].line : -1)))));
   }
 
   /** The fences that show as code boxes, in document order (Mermaid sources only when shown). */
@@ -2283,7 +2318,7 @@ export default class FilePreview extends View {
           .child(v_flex().id("fp-col").w_full().max_w(Math.round(COL_W * this.textZoom)).gap(Math.round(12 * this.textZoom)).text_size(this.proseSize())
             .on_size_change((size, cx) => { if (Math.round(size.width) !== this.colW) { this.colW = Math.round(size.width); cx.notify(); } })
             .children(this.blocks.map((b, i) => this.marked(b, t, b.kind === "md"
-              ? TextView.markdown(`md-${i}`, b.text).selectable(true).on_link_click((url, cx) => this.link(url, cx))
+              ? TextView.markdown(`md-${i}`, this.markedText(b, t)).selectable(true).on_link_click((url, cx) => this.link(url, cx))
               : b.kind === "mmd" ? this.diagramBlock(b, i, t) : this.codeBlock(b, i, t))))));
     else if (doc.kind === "text" && this.code) body = this.codeView(t);
     else body = this.message(t, doc.message ?? "Cannot preview this file");
@@ -2332,7 +2367,7 @@ export default class FilePreview extends View {
               .children(m.dels.map((n) => svg(ICON + "deleted.svg").size(7).absolute().left(1).top(Math.max(0, Math.min(text - 7, n * lh - 3.5))).text_color(t.ansi1)))))
           .child(div().flex_1().min_w(0).h(text).overflow_hidden().relative()
             .child(div().w_full().h(text + slack).flex_none().child(editor))
-            .when(Boolean(hits), (e) => e.children(this.lineMarks(hits.map((h) => h.line - 1), lh, false, t, cur - 1)))));
+            .when(Boolean(hits), (e) => e.children(this.lineMarks(hits.map((h) => h.line - 1), lh, t, cur - 1)))));
     }
     // Rows [from, from + n) as a share of the strip; the lower half hangs from the bottom so a
     // minimum height never pokes out of the strip.
@@ -2351,12 +2386,12 @@ export default class FilePreview extends View {
 
   /**
    * Rows (from 0) with matches, aligned on the text: a tint across the row and a bar at the
-   * right edge. `current` marks them all as the current block; `at`, one row.
+   * right edge. `at`: the row of the current match, stronger.
    */
-  lineMarks(rows, lh, current, t, at = -1) {
+  lineMarks(rows, lh, t, at = -1) {
     const soft = tint(t.accent, "22"), strong = tint(t.accent, "44");
     return rows.flatMap((r) => {
-      const on = current || r === at, out = [];
+      const on = r === at, out = [];
       const bg = on ? strong : soft;
       if (bg) out.push(div().absolute().left(0).right(0).top(r * lh).h(lh).bg(bg));
       out.push(div().absolute().right(0).w(on ? 4 : 2).top(r * lh).h(lh).bg(t.accent));

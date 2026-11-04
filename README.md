@@ -103,14 +103,17 @@ the window (a Preview button next to Files and Changes) or as a near-full-screen
   next buttons. Matching is a case-insensitive substring over the file's source (prose,
   fences and Mermaid sources). **It marks matches but can't scroll to them** (see
   Limitations), so it tells you where the current one is, in the status bar:
-  `Find: block 2 of 3 · line 82 · <section heading>`.
-  - Markdown: a bar in the right margin of each block with matches; the current block is
-    framed. Lines with matches inside a code fence are tinted.
+  `Find: match 3 of 12 · line 82 · <section heading>`.
+  - Markdown: each match in the prose is highlighted in the theme's accent, the current
+    one stronger; a bar in the right margin marks each block with matches and the current
+    block is framed. Matches inside code spans, link targets, raw HTML or centered and
+    right-aligned table cells, or that span Markdown syntax, aren't highlighted (the bar
+    still counts them). Lines with matches inside a code fence are tinted.
   - Code files: matching lines are tinted in the line-aligned layout (repository files up
     to 1,000 lines); otherwise each match is a mark on an overview strip at the right edge.
-  - `Enter` / `↓` / `n` go to the next block (or line), `shift-Enter` / `↑` / `shift-n`
-    to the previous one, `Esc` closes the bar. The search survives live reload and is
-    cleared when you open another file.
+  - `Enter` / `↓` / `n` go to the next match (a line in a code file), `shift-Enter` / `↑` /
+    `shift-n` to the previous one, `Esc` closes the bar. The search survives live reload
+    and is cleared when you open another file.
 - **Commit history** (GitLab-style graph). Inside a git repository the sidebar has three
   tabs, **Files | Commits | Changes**; the choice is remembered separately for the popup and
   the side panel, and the tabs are hidden outside a repository. In the popup, drag the
@@ -263,7 +266,7 @@ Inside the mod:
 | `Tab` | Switch focus between the tree and the preview (side panel: open the list's page, or go back to it) |
 | `r` | Reload the tree and the file |
 | `/` or `cmd-f` | Find a file (tree focused) or find in the document (preview focused) |
-| `n` / `shift-n` | Next / previous match block while the document search is open (preview focused) |
+| `n` / `shift-n` | Next / previous match while the document search is open (preview focused) |
 | `b` | Hide or show the file tree (popup) |
 | `g` | Switch the sidebar from Files to Commits, and from Commits or Changes back to Files (in a git repository) |
 | `Backspace` | Back to the commit from a file shown as of that commit (preview focused) |
@@ -310,10 +313,10 @@ as the popup) and close. An expanded diagram's bar has zoom out, zoom in, fit an
   up, so they are a little soft; the expanded view renders a sharper copy.
 - **Document search marks matches but doesn't scroll to them.** Herdr can only scroll
   virtual lists from a script, not the document, so the find bar and status bar tell you
-  the block, line and section of the current match instead. Words aren't highlighted
-  inside text: Herdr's text views and editors expose no highlight or selection API, so
-  the marks are per block (Markdown) or per line (code). A long prose run between two
-  fences is one block, so its frame can be tall.
+  the match, line and section of the current one instead. Words are highlighted only in
+  Markdown prose (through `<mark>`); editors expose no highlight or selection API, so code
+  fences and code files get per-line marks. A long prose run between two fences is one
+  block, so its frame can be tall.
 - File search lists at most 50,000 files in a git repository and 20,000 elsewhere.
 - Leaving an expanded diagram in the popup puts the document back at its top: Herdr
   can't read or restore a scroll position.
