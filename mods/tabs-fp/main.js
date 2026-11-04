@@ -5,6 +5,7 @@ import { h_flex } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, keys } from "herdr";
 
 const PREVIEW = "file-preview";
+const PANEL_W = 368;   // the side panel's width in main-fp.json: where a tab never resized starts
 
 // A keys.json combo as Herdr's status bar writes it: "cmd-shift-e" is ⌘⇧E on macOS, Ctrl+Shift+E elsewhere.
 function shortcut(combo, mac) {
@@ -32,6 +33,41 @@ export default class Tabs extends View {
   init() {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
+    this.widths = JSON.parse(localStorage.getItem("widths") ?? "{}");
+  }
+
+  // The side panel's width is remembered per tab (the layout keeps one for the whole window):
+  // switching tab or space resizes it to that tab's, and a drag records it for the tab shown.
+  syncWidth(tab, panel) {
+    const px = panel?.size?.px;
+    if (!tab || typeof px !== "number") return;
+    if (tab.id !== this.widthTab) {
+      const first = this.widthTab === undefined;
+      this.widthTab = tab.id;
+      // On start a tab never resized keeps the width shown, as its own.
+      if (first && this.widths[tab.id] === undefined) { this.keepWidth(tab.id, px); return; }
+      const want = this.widths[tab.id] ?? PANEL_W;
+      if (Math.abs(want - px) >= 1) {
+        this.widthPending = { want, until: Date.now() + 1000 };
+        run("layout.resize", { id: "panel", px: want });
+      }
+      return;
+    }
+    // Until the resize lands, the old width isn't this tab's.
+    if (this.widthPending) {
+      if (Math.abs(px - this.widthPending.want) >= 1 && Date.now() < this.widthPending.until) return;
+      this.widthPending = null;
+    }
+    this.keepWidth(tab.id, px);
+  }
+
+  keepWidth(id, px) {
+    if (this.widths[id] === px || (this.widths[id] === undefined && px === PANEL_W)) return;
+    this.widths[id] = px;
+    // Closed tabs go with the next write.
+    const open = new Set(spaces().flatMap(s => s.tabs.map(x => x.id)));
+    for (const k of Object.keys(this.widths)) if (!open.has(k)) delete this.widths[k];
+    localStorage.setItem("widths", JSON.stringify(this.widths));
   }
 
   // The side panel is remembered per space: switching shows that space's choice
@@ -96,6 +132,7 @@ export default class Tabs extends View {
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = shared("workspace.panels") ?? ["files", "changes"];
     this.syncPanel(space, panel, body, enabled);
+    this.syncWidth(shown.find(c => c.active), panel);
     const panelButton = (id, label, icon, tip) => {
       const on = panel && !panel.hidden && body?.active === id;
       return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
