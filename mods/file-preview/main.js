@@ -2150,39 +2150,41 @@ export default class FilePreview extends View {
   /**
    * The whole-file Editor. In a repo it is laid out at its full height (taller than its text, so
    * it never scrolls itself) inside a scrolling box, next to a gutter of changed lines that
-   * scrolls with it. Past FULL_MAX lines, or soft-wrapped, it keeps its own scroll and the
-   * changes go on an overview ruler at the right edge.
+   * scrolls with it. Past FULL_MAX lines, or soft-wrapped, it keeps its own scroll and has no
+   * gutter. Either way an overview ruler at the right edge shows the whole file's changes.
    */
   codeView(t) {
     const editor = Editor.new(this.code).size_full(), m = this.codeMarks, ds = this.ds;
     const hits = ds?.hits.length ? ds.hits : null, cur = hits ? hits[ds.at].line : 0;
+    let body;
     if (this.codeLayout() === "plain") {
-      const box = div().flex_1().min_w(0).h_full().child(editor);
-      if (!this.git && !hits) return div().flex_1().min_h(0).size_full().child(box);
-      // Rows [from, from + n) as a share of the strip; the lower half hangs from the bottom so a
-      // 2 px minimum never pokes out of the strip.
-      const rows = Math.max(1, this.doc.lines), pct = (n) => `${(100 * n) / rows}%`;
-      const at = (el, from, n) => (2 * from + n <= rows ? el.top(pct(from)) : el.bottom(pct(rows - from - n)));
-      return h_flex().flex_1().min_h(0).size_full().child(box)
-        .when(Boolean(this.git), (el) => el.child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
-          .when(Boolean(m), (e) => e
-            .children(m.runs.map((r) => at(div().absolute().left(2).w(RULER - 4).h(pct(r.n)).min_h(4).rounded(1).bg(barColor(r.kind, t)), r.from - 1, r.n)))
-            .children(m.dels.map((n) => at(div().absolute().left(1).w(RULER - 2).h(3).rounded(1).bg(t.ansi1), n, 0))))))
-        // Search: a strip of its own, so its marks never cover the git ones.
-        .when(Boolean(hits), (el) => el.child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
-          .children(hits.map((h) => at(div().absolute().left(h.line === cur ? 0 : 2).w(h.line === cur ? RULER : RULER - 4).h(pct(1))
-            .min_h(h.line === cur ? 4 : 2).bg(h.line === cur ? t.foreground : t.accent), h.line - 1, 1)))));
+      body = div().flex_1().min_w(0).h_full().child(editor);
+      if (!this.git && !hits) return div().flex_1().min_h(0).size_full().child(body);
+    } else {
+      const lh = lineHeight(this.codeFont), text = this.doc.lines * lh, slack = Math.max(text, 3 * lh);
+      body = div().id(`code:${this.file}`).flex_1().min_w(0).h_full().overflow_y_scrollbar()
+        .child(h_flex().w_full().h(text).flex_none().items_start()
+          .child(div().w(GUTTER).h(text).flex_none().relative()
+            .when(Boolean(m), (e) => e
+              .children(m.runs.map((r) => div().absolute().left(3).w(3).top((r.from - 1) * lh).h(r.n * lh).bg(barColor(r.kind, t))))
+              .children(m.dels.map((n) => svg(ICON + "deleted.svg").size(7).absolute().left(1).top(Math.max(0, Math.min(text - 7, n * lh - 3.5))).text_color(t.ansi1)))))
+          .child(div().flex_1().min_w(0).h(text).overflow_hidden().relative()
+            .child(div().w_full().h(text + slack).flex_none().child(editor))
+            .when(Boolean(hits), (e) => e.children(this.lineMarks(hits.map((h) => h.line - 1), lh, false, t, cur - 1)))));
     }
-    const lh = lineHeight(this.codeFont), text = this.doc.lines * lh, slack = Math.max(text, 3 * lh);
-    return div().id(`code:${this.file}`).flex_1().min_h(0).size_full().overflow_y_scrollbar()
-      .child(h_flex().w_full().h(text).flex_none().items_start()
-        .child(div().w(GUTTER).h(text).flex_none().relative()
-          .when(Boolean(m), (e) => e
-            .children(m.runs.map((r) => div().absolute().left(3).w(3).top((r.from - 1) * lh).h(r.n * lh).bg(barColor(r.kind, t))))
-            .children(m.dels.map((n) => svg(ICON + "deleted.svg").size(7).absolute().left(1).top(Math.max(0, Math.min(text - 7, n * lh - 3.5))).text_color(t.ansi1)))))
-        .child(div().flex_1().min_w(0).h(text).overflow_hidden().relative()
-          .child(div().w_full().h(text + slack).flex_none().child(editor))
-          .when(Boolean(hits), (e) => e.children(this.lineMarks(hits.map((h) => h.line - 1), lh, false, t, cur - 1)))));
+    // Rows [from, from + n) as a share of the strip; the lower half hangs from the bottom so a
+    // minimum height never pokes out of the strip.
+    const rows = Math.max(1, this.doc.lines), pct = (n) => `${(100 * n) / rows}%`;
+    const at = (el, from, n) => (2 * from + n <= rows ? el.top(pct(from)) : el.bottom(pct(rows - from - n)));
+    return h_flex().flex_1().min_h(0).size_full().child(body)
+      .when(Boolean(this.git), (el) => el.child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
+        .when(Boolean(m), (e) => e
+          .children(m.runs.map((r) => at(div().absolute().left(2).w(RULER - 4).h(pct(r.n)).min_h(4).rounded(1).bg(barColor(r.kind, t)), r.from - 1, r.n)))
+          .children(m.dels.map((n) => at(div().absolute().left(1).w(RULER - 2).h(3).rounded(1).bg(t.ansi1), n, 0))))))
+      // Search: a strip of its own, so its marks never cover the git ones.
+      .when(Boolean(hits), (el) => el.child(div().w(RULER).flex_none().h_full().relative().border_l(1).border_color(t.border)
+        .children(hits.map((h) => at(div().absolute().left(h.line === cur ? 0 : 2).w(h.line === cur ? RULER : RULER - 4).h(pct(1))
+          .min_h(h.line === cur ? 4 : 2).bg(h.line === cur ? t.foreground : t.accent), h.line - 1, 1)))));
   }
 
   /**

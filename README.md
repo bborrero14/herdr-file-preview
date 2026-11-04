@@ -58,8 +58,9 @@ as a panel docked to the right of the terminal.
   colors changed files and gives each a letter, and folders with changes below them get
   a dot. Code files mark what changed against `HEAD` (staged and unstaged together); Markdown
   documents get no marks (the Changes tab shows their diff):
-  - Up to 1,000 lines: a gutter left of the line numbers, line by line.
-    Longer files (and soft-wrapped JSON) get an overview ruler on the right edge instead.
+  - An overview ruler on the right edge: the whole file's changes at a glance.
+  - Up to 1,000 lines, also a gutter left of the line numbers, line by line (longer files
+    and soft-wrapped JSON have only the ruler).
 
   | Mark | Meaning | Color |
   |---|---|---|
