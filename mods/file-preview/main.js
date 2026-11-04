@@ -2,7 +2,7 @@
 // Markdown (prose in TextView, fences highlighted in readonly Editors, Mermaid as PNG) and code.
 // It follows the focused terminal (local or remote space) and reloads what it shows when it changes.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, h_resizable, resizable_panel, Editor, EditorState, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, watchFolder, theme, settings, props, closeOverlay, openOverlay, nextCommand, home, window, run, shared, setShared } from "herdr";
 import { Tree, parent, PER_FOLDER, TOTAL } from "./tree.js";
 import { readSource, stamp, LIMIT } from "./source.js";
@@ -54,6 +54,8 @@ const CROW = 24;             // commit row height
 const LANE_W = 14, NARROW_LANE_W = 10, MAX_LANES = 10, NARROW_MAX_LANES = 6;
 const COMMITS_W = 460;       // the sidebar's width on the Commits tab, when the view is wide
 const META_W = 360;          // author and date show from this sidebar width
+const SIDE_W_KEY = "file-preview.sidebar-width.";   // + mode + "." + "files" | "commits" | "narrow": px, or null
+const MIN_SIDE_W = 160, MIN_PREVIEW_W = 240;          // a dragged sidebar keeps the preview at least this wide
 const statusColor = (s, t) => (s === "A" ? t.ansi2 : s === "D" ? t.ansi1 : s === "R" || s === "C" ? t.ansi4 : t.ansi3);
 
 /** Reading zoom action of an unmodified key: "in" | "out" | "reset" | null. */
@@ -172,6 +174,7 @@ export default class FilePreview extends View {
     this.textZoom = LEVELS.includes(z) ? z : 1;
     this.codeFont = Math.round(FONT * this.textZoom);   // font size of every Editor
     this.width = null;      // measured width of the whole view
+    this.sideW = null;      // measured width of the sidebar (it can be dragged)
     // Narrow view without a stored choice: the tree is unfolded. A 45 % panel is ~550 px on a
     // 1512 px window, so it starts open unless a file comes with the props (the popup's Anchor).
     this.treeOpen = typeof p.file !== "string";
@@ -1261,7 +1264,13 @@ export default class FilePreview extends View {
     cx?.notify();
   }
 
+  /** The sidebar's layout key: its tab, or "narrow" (one width for both tabs). */
+  sideKey(narrow) { return narrow ? "narrow" : this.sideNow(); }
+
+  /** The width the sidebar opens at: the one last dragged to, else the default. */
   sideWidth(narrow) {
+    const kept = shared(SIDE_W_KEY + this.mode + "." + this.sideKey(narrow));
+    if (typeof kept === "number") return kept;
     if (narrow) return Math.min(NARROW_TREE_W, Math.round(this.width * 0.55));
     if (this.sideNow() !== "commits") return TREE_W;
     return Math.max(TREE_W, Math.min(COMMITS_W, Math.round((this.width ?? 1000) * 0.4)));
@@ -1490,8 +1499,7 @@ export default class FilePreview extends View {
       .child(this.topBar(t))
       .child(h_flex().flex_1().min_h(0)
         .when(narrow || !shown, (el) => el.child(this.strip(t)))
-        .when(shown, (el) => el.child(this.sidePane(rows, t, this.sideWidth(narrow), cx)))
-        .child(this.previewPane(t, narrow)))
+        .child(this.split(rows, t, narrow, shown, cx)))
       .child(this.statusBar(t));
   }
 
@@ -1648,9 +1656,24 @@ export default class FilePreview extends View {
   }
 
   /** The sidebar: Files | Commits tabs (in a repo) over the tree or the history. */
-  sidePane(rows, t, w, cx) {
-    const side = this.sideNow();
-    return v_flex().id("fp-side").w(w).flex_none().h_full().min_h(0).border_r(1).border_color(t.border).bg(t.chrome).text_size(12.5)
+  /**
+   * The sidebar and the preview, with a draggable divider. One group per layout key, so the
+   * Files tab, the Commits tab and the narrow view each keep their own width; a drag is stored
+   * per mode and is where the sidebar opens next time.
+   */
+  split(rows, t, narrow, shown, cx) {
+    const key = this.sideKey(narrow), max = Math.max(MIN_SIDE_W, (this.width ?? 1000) - MIN_PREVIEW_W);
+    return h_resizable(`fp-split-${key}`).flex_1().min_w(0).h_full()
+      .on_resize((sizes, cx) => { setShared(SIDE_W_KEY + this.mode + "." + key, Math.round(sizes[0])); cx.notify(); })
+      .child(resizable_panel().size(this.sideWidth(narrow)).size_range(MIN_SIDE_W, max).visible(shown)
+        .child(shown ? this.sidePane(rows, t, cx) : div()))
+      .child(resizable_panel().child(this.previewPane(t, narrow)));
+  }
+
+  sidePane(rows, t, cx) {
+    const side = this.sideNow(), w = this.sideW ?? this.sideWidth(this.narrow());
+    return v_flex().id("fp-side").size_full().min_h(0).border_r(1).border_color(t.border).bg(t.chrome).text_size(12.5)
+      .on_size_change((size, cx) => { if (Math.round(size.width) !== this.sideW) { this.sideW = Math.round(size.width); cx.notify(); } })
       .when(Boolean(this.git), (el) => el.child(h_flex().h(28).flex_none().px(6).gap(2).items_end().border_b(1).border_color(t.border)
         .child(this.sideTab("files", "Files", side, t)).child(this.sideTab("commits", "Commits", side, t))))
       .child(side === "commits" ? this.commitsPane(t, w, cx) : this.treePane(rows, t));
