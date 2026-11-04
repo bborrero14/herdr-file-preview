@@ -124,15 +124,3 @@ function splitOnce(s) {
   if (b < 0) return [s.slice(0, a), s.slice(a + 1), ""];
   return [s.slice(0, a), s.slice(a + 1, b), s.slice(b + 1)];
 }
-
-/** Changed lines (1-based) of [start, end] as a bar kind: "a" | "m" | null; mixed is "m". */
-export function rangeKind(marks, start, end) {
-  if (!marks) return null;
-  let kind = null;
-  for (let i = start; i <= end; i++) {
-    const k = marks.lines.get(i);
-    if (k === "m") return "m";
-    if (k) kind = "a";
-  }
-  return kind;
-}

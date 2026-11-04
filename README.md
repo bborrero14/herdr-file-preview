@@ -56,10 +56,9 @@ as a panel docked to the right of the terminal.
   machines. Diagrams are always rendered on the local machine.
 - **Git changes, VS Code style.** Inside a git repository (local or remote), the tree
   colors changed files and gives each a letter, and folders with changes below them get
-  a dot. The document marks what changed against `HEAD` (staged and unstaged together):
-  - Markdown: a 3 px bar left of each block (a prose run, a fence or a diagram) that
-    has added or modified lines, and a small red triangle where lines were deleted.
-  - Code files up to 1,000 lines: a gutter left of the line numbers, line by line.
+  a dot. Code files mark what changed against `HEAD` (staged and unstaged together); Markdown
+  documents get no marks (the Changes tab shows their diff):
+  - Up to 1,000 lines: a gutter left of the line numbers, line by line.
     Longer files (and soft-wrapped JSON) get an overview ruler on the right edge instead.
 
   | Mark | Meaning | Color |

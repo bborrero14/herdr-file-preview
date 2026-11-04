@@ -45,7 +45,7 @@ const POLL_GIT = 5000;
 // A full-height Editor lays out every row each frame: ~16 ms at 1000 rows, 45 ms at 2000.
 const FULL_MAX = 1000;       // code files up to this many rows get a line gutter; longer ones, the ruler
 const GUTTER = 8, RULER = 8;
-const BAR_X = 8;             // a Markdown block's bar sits this far left of the column
+const BAR_X = 8;             // a Markdown block's search bar sits this far right of the column
 const FILES_EVERY = 5000;    // an open file search re-lists the root at most this often
 const MEMORY_DELAY = 500;    // the popup stores its per-root state this long after the last change
 // Commit history in the sidebar.
@@ -498,11 +498,14 @@ export default class FilePreview extends View {
     });
   }
 
-  /** Changed lines of the shown file: none when clean or outside a repo, all for an untracked one. */
+  /**
+   * Changed lines of the shown code file: none when clean or outside a repo, all for an untracked
+   * one. Markdown gets none: its blocks are too coarse to place them well.
+   */
   refreshMarks(cx) {
     const file = this.file, doc = this.doc, ctx = this.ctx;
     const letter = file && this.git ? this.git.files.get(file) : undefined;
-    if (!doc || (doc.kind !== "markdown" && doc.kind !== "text") || !letter) return this.setMarks(null);
+    if (!doc || doc.kind !== "text" || !letter) return this.setMarks(null);
     if (letter === "U") return this.setMarks(git.added(doc.text));
     if (this.marking) { this.markAgain = true; return; }
     this.marking = true;
@@ -521,23 +524,10 @@ export default class FilePreview extends View {
     this.decorate();
   }
 
-  /**
-   * Puts the marks on what shows them: each Markdown block gets a bar kind and deletion
-   * markers (top / bottom); the code view gets runs of changed lines.
-   */
+  /** Puts the marks on the code view: runs of changed lines and deletions. */
   decorate() {
     const m = this.marks;
     this.codeMarks = m && this.doc?.kind === "text" ? { runs: git.runs(m), dels: [...m.dels].sort((a, b) => a - b) } : null;
-    const blocks = this.blocks.filter((b) => b.start);
-    for (const b of blocks) b.mark = m ? { bar: git.rangeKind(m, b.start, b.end), top: false, bottom: false } : null;
-    if (!m || !blocks.length) return;
-    for (const n of m.dels) {
-      // After line n: the first block that ends at or below it, else the last one's bottom.
-      const b = blocks.find((b) => b.end >= n);
-      if (!b) blocks[blocks.length - 1].mark.bottom = true;
-      else if (n === b.end && n >= b.start) b.mark.bottom = true;
-      else b.mark.top = true;
-    }
   }
 
   /** Remote (or polled) file: re-read only when its mtime or size moves. */
@@ -2143,16 +2133,9 @@ export default class FilePreview extends View {
       .child(body);
   }
 
-  /**
-   * A Markdown block with its git marks, drawn in the column's side padding so nothing moves:
-   * a bar for added or modified lines, a red triangle where lines were deleted.
-   */
+  /** A Markdown block with its search marks, drawn in the column's side padding so nothing moves. */
   marked(b, t, el) {
-    const m = b.mark;
     return v_flex().w_full().flex_none().relative().child(el)
-      .when(Boolean(m?.bar), (e) => e.child(div().absolute().top(0).bottom(0).left(-BAR_X).w(3).rounded(1).bg(barColor(m.bar, t))))
-      .when(Boolean(m?.top), (e) => e.child(svg(ICON + "deleted.svg").size(7).absolute().top(-4).left(-BAR_X - 1).text_color(t.ansi1)))
-      .when(Boolean(m?.bottom), (e) => e.child(svg(ICON + "deleted.svg").size(7).absolute().bottom(-4).left(-BAR_X - 1).text_color(t.ansi1)))
       // Search: a bar in the right padding; the current block also gets a frame.
       .when(Boolean(b.find), (e) => e.child(div().absolute().top(0).bottom(0).right(b.find.current ? -BAR_X - 1 : -BAR_X).w(b.find.current ? 5 : 3).rounded(2).bg(t.accent)))
       .when(Boolean(b.find?.current), (e) => e.child(div().absolute().top(-4).bottom(-4).left(-4).right(-4).rounded(6).border_1().border_color(t.accent)));
