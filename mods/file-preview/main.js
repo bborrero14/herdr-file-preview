@@ -54,6 +54,8 @@ const CROW = 24;             // commit row height
 const LANE_W = 14, NARROW_LANE_W = 10, MAX_LANES = 10, NARROW_MAX_LANES = 6;
 const COMMITS_W = 460;       // the sidebar's width on the Commits tab, when the view is wide
 const META_W = 360;          // author and date show from this sidebar width
+const SCOPE_KEY = "file-preview.commits.scope";       // "head", or null for all branches
+const REMOTES_KEY = "file-preview.commits.remotes";   // false hides remote branches, else null
 const SIDE_W_KEY = "file-preview.sidebar-width.";   // + mode + "." + "files" | "commits" | "changes" | "narrow": px, or null
 const SECTIONS = [["staged", "Staged"], ["unstaged", "Unstaged"], ["untracked", "Untracked"]];   // the Changes tab
 const MIN_SIDE_W = 160, MIN_PREVIEW_W = 240;          // a dragged sidebar keeps the preview at least this wide
@@ -158,7 +160,8 @@ export default class FilePreview extends View {
     this.commitScroll = VirtualListScrollHandle.new();
     const side = shared(SIDE_KEY + this.mode);
     this.side = side === "commits" || side === "changes" ? side : "files";   // the sidebar tab chosen
-    this.scope = "all";     // history of every ref ("all") or of HEAD ("head")
+    this.scope = shared(SCOPE_KEY) === "head" ? "head" : "all";   // history of every branch ("all") or of HEAD ("head")
+    this.remotes = shared(REMOTES_KEY) !== false;   // with "all": remote branches too
     this.commit = null;     // the commit shown: { hash, data, loading, error }; or an uncommitted change: { change, ... }
     this.changeScroll = VirtualListScrollHandle.new();
     this.changeCursor = null;   // keyboard row of the Changes tab ("<section>:<rel path>")
@@ -1089,12 +1092,13 @@ export default class FilePreview extends View {
     if (c === "find-next" || c === "find-prev") { const d = c === "find-next" ? 1 : -1; if (this.ds) this.docStep(d); else this.treeMove(d); return; }
     if (c === "find-enter") { if (this.ts) this.treePick(cx); else this.docStep(1); return; }
     if (c === "find-close") { if (this.ds && this.findSide() === "doc") this.closeDocFind(); else if (this.ts) this.closeTreeFind(cx); else this.closeDocFind(); return; }
-    // Commits: tab:files, tab:commits, commits-scope (all refs / current branch), commits-more,
+    // Commits: tab:files, tab:commits, commits-scope (all refs / current branch), commits-remotes, commits-more,
     // commit:<row index | hash prefix>, commit-file:<n>, commit-back, commit-close, copy-hash.
     if (c === "tab:files" || c === "tab:commits" || c === "tab:changes") return this.setSide(c.slice(4), cx);
     // Changes: change:<row index | path>, opens that change's diff.
     if (c.startsWith("change:")) return this.changeCmd(c.slice(7), cx);
     if (c === "commits-scope") return this.toggleScope(cx);
+    if (c === "commits-remotes") return this.toggleRemotes(cx);
     if (c === "commits-more") return this.loadLog(this.ctx, cx, { more: true });
     if (c.startsWith("commit:")) return this.commitCmd(c.slice(7), cx);
     if (c.startsWith("commit-file:")) return this.openAt(Number(c.slice(12)), cx);
@@ -1321,11 +1325,11 @@ export default class FilePreview extends View {
    */
   loadLog(ctx, cx, { more = false } = {}) {
     if (!ctx || this.ctx !== ctx || !this.tree.root || this.closed || !cx) return;
-    const log = ctx.log ??= { scope: this.scope, rows: [], index: new Map(), graph: null, remotes: [], more: false, loading: false,
+    const log = ctx.log ??= { scope: this.logScope(), rows: [], index: new Map(), graph: null, remotes: [], more: false, loading: false,
       again: null, loaded: false, error: null, empty: false, sig: null, cursor: null };
     if (more && (!log.more || !log.loaded)) return;
     if (log.loading) { log.again = log.again === "full" || !more ? "full" : "more"; return; }
-    const scope = this.scope, full = !more || log.scope !== scope;
+    const scope = this.logScope(), full = !more || log.scope !== scope;
     const skip = full ? 0 : log.rows.length;
     const count = full ? Math.max(hist.PAGE, log.scope === scope ? log.rows.length : 0) : hist.PAGE;
     log.loading = true;
@@ -1337,7 +1341,7 @@ export default class FilePreview extends View {
       if (this.ctx !== ctx || ctx.log !== log) return;
       let again = log.again;
       log.again = null;
-      if (r && !full && (r.sig !== log.sig || this.scope !== scope)) again = "full";   // history moved between pages
+      if (r && !full && (r.sig !== log.sig || this.logScope() !== scope)) again = "full";   // history moved between pages
       else if (r && (r.error || r.notRepo || r.empty)) {
         Object.assign(log, { rows: [], index: new Map(), graph: null, more: false, loaded: true, sig: null,
           error: r.error ?? (r.notRepo ? "Not in a git repository" : null), empty: Boolean(r.empty), scope });
@@ -1367,8 +1371,21 @@ export default class FilePreview extends View {
     });
   }
 
+  /** What hist.log() lists: every branch, or the current one, each with or without remote branches. */
+  logScope() { return this.scope === "head" ? (this.remotes ? "upstream" : "head") : this.remotes ? "all" : "local"; }
+
+  /** The All branches switch (off: the current branch only); remembered. */
   toggleScope(cx) {
     this.scope = this.scope === "all" ? "head" : "all";
+    setShared(SCOPE_KEY, this.scope === "head" ? "head" : null);
+    this.loadLog(this.ctx, cx);
+    cx.notify();
+  }
+
+  /** The Remotes button: remote branches in the history (on Current branch, its upstream); remembered. */
+  toggleRemotes(cx) {
+    this.remotes = !this.remotes;
+    setShared(REMOTES_KEY, this.remotes ? null : false);
     this.loadLog(this.ctx, cx);
     cx.notify();
   }
@@ -1924,6 +1941,31 @@ export default class FilePreview extends View {
       .on_click((_e, cx) => this.setSide(key, cx)).child(label);
   }
 
+  /** The branch scope as a two-sided switch: "All branches" and "Current branch" inside it, the chosen one lit. */
+  scopeSwitch(t) {
+    const side = (scope, label, tip) => {
+      const on = this.scope === scope;
+      return h_flex().id(`fp-scope-${scope}`).h(18).px(8).flex_none().rounded_full().items_center().text_size(11.5)
+        .bg(on ? t.accent : t.raised).text_color(on ? t.background : t.muted).when(on, (el) => el.font_medium())
+        .when(!on, (el) => el.cursor_pointer().hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => this.toggleScope(cx)))
+        .tooltip(tip).child(label);
+    };
+    return h_flex().id("fp-scope").h(22).p(2).flex_none().rounded_full().items_center().bg(t.raised).border_1().border_color(t.border)
+      .child(side("all", "All branches", "Every branch, tag and HEAD"))
+      .child(side("head", "Current branch", "Only the checked-out branch (git log HEAD)"));
+  }
+
+  /** Remote branches on or off: every remote branch, or on Current branch its upstream (what to pull or push). */
+  remotesButton(t) {
+    const on = this.remotes, head = this.scope === "head";
+    const tip = on ? (head ? "Hide the upstream branch" : "Hide remote branches")
+      : head ? "Show the upstream branch too (what is not pulled or pushed yet)" : "Show remote branches";
+    return h_flex().id("fp-remotes").h(20).px(7).flex_none().rounded(5).items_center().border_1().text_size(11.5)
+      .border_color(on ? t.accent : t.border).bg(on ? tint(t.accent, "1f") ?? t.selected : t.background).text_color(on ? t.foreground : t.dim)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.toggleRemotes(cx)).tooltip(tip)
+      .child("Remotes");
+  }
+
   /** The commit list: a toolbar (scope, count) over a virtual list of graph rows. */
   commitsPane(t, w, cx) {
     const ctx = this.ctx, log = ctx?.log, rows = log?.rows ?? [], more = Boolean(log?.more);
@@ -1939,10 +1981,8 @@ export default class FilePreview extends View {
     return v_flex().id("fp-commits-pane").w_full().flex_1().min_h(0)
       .track_focus(this.commitsFocus).on_key_down((e, cx) => this.onKey(e, cx, "commits"))
       .child(h_flex().h(28).flex_none().pl(4).pr(8).gap(6).items_center().border_b(1).border_color(t.border)
-        .child(h_flex().id("fp-scope").h(22).px(6).gap(5).flex_none().rounded(5).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => this.toggleScope(cx))
-          .child(div().size(7).rounded_full().bg(this.scope === "all" ? t.accent : t.ansi2))
-          .child(div().text_size(11.5).text_color(t.muted).child(this.scope === "all" ? "All branches" : "Current branch")))
+        .child(this.scopeSwitch(t))
+        .child(this.remotesButton(t))
         .child(div().flex_1())
         .child(div().flex_none().text_size(11).text_color(t.dim).child(count)))
       .when(rows.length > 0, (el) => el.child(div().flex_1().min_h(0).relative()

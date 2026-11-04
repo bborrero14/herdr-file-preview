@@ -13,11 +13,13 @@ export const COLORS = 6;   // lane colors (graph.js palette)
 // Refs that change the graph: HEAD and every branch, tag and remote ref, as one checksum.
 const SIG = '{ g rev-parse -q --verify HEAD; g symbolic-ref -q HEAD; g for-each-ref --format="%(objectname)%(refname)" refs/heads refs/tags refs/remotes; } | cksum';
 
-// $1 root, $2 skip, $3 count, $4 "all" | "head". Prints sig \1 HEAD \1 remotes \1 commits (NUL-separated,
+// $1 root, $2 skip, $3 count, $4 "all" | "local" (no remote branches) | "head" | "upstream" (HEAD and its
+// remote branch, when it has one). Prints sig \1 HEAD \1 remotes \1 commits (NUL-separated,
 // fields \x1f-separated). Exit 4: no git; 5: not a repo; 6: no commits yet.
 const LOG = GIT + '; r=$1; s=$2; n=$3; w=$4; command -v git >/dev/null 2>&1 || exit 4; g rev-parse --git-dir >/dev/null 2>&1 || exit 5; '
   + 'h=$(g rev-parse -q --verify HEAD) || exit 6; ' + SIG + '; printf "\\001%s\\001" "$h"; g remote | tr "\\n" " "; printf "\\001"; '
-  + 'if [ "$w" = all ]; then set -- --branches --tags --remotes HEAD; else set -- HEAD; fi; '
+  + 'case $w in all) set -- --branches --tags --remotes HEAD;; local) set -- --branches --tags HEAD;; '
+  + 'upstream) if g rev-parse -q --verify "@{u}" >/dev/null 2>&1; then set -- HEAD "@{u}"; else set -- HEAD; fi;; *) set -- HEAD;; esac; '
   + 'g log "$@" --topo-order -z --no-color --format="%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s" --skip="$s" -n "$n"';
 
 // $1 root. The refs checksum alone, for polling.
@@ -125,6 +127,8 @@ export async function log(root, on, { skip = 0, count = PAGE, scope = "all" } = 
     const f = e.split(US);
     if (f.length >= 7 && /^[0-9a-f]{7,64}$/.test(f[0])) commits.push(commitOf(f, remotes, head));
   }
+  // Without remote branches, a local commit's origin/... flag goes too.
+  if (scope === "local" || scope === "head") for (const c of commits) { c.refs = c.refs.filter((x) => x.kind !== "remote"); c.flags = flags(c.refs); }
   const more = commits.length > count;
   if (more) commits.length = count;
   return { sig, head, remotes, commits, more };

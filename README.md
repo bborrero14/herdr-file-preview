@@ -118,8 +118,14 @@ the window (a Preview button next to Files and Changes) or as a near-full-screen
 
   - The Commits tab lists `git log --topo-order` of every branch, tag and remote ref plus
     `HEAD` (stashes are left out), 300 commits at a time; the next page loads when you
-    scroll or move near the end, or with the "Load more" row. The **All branches /
-    Current branch** button switches to `git log HEAD`.
+    scroll or move near the end, or with the "Load more" row. Two controls on top, both
+    remembered:
+    - The **All branches | Current branch** switch, both labels inside it and the chosen
+      one lit. Current branch is `git log HEAD`.
+    - The **Remotes** button, next to it. On All branches it adds every remote branch; on
+      Current branch, the branch's upstream (`git log HEAD @{u}`), so commits not pulled or
+      pushed yet show too. Off, no remote branches, neither their commits nor their
+      `origin/...` flags.
   - Each row has the graph cell (one colored lane per branch, curves where branches fork
     and merge, a node per commit, a ring for merges, an outlined node for `HEAD`), ref
     labels GitLab-style at the node (a flag pointing at it, in the lane's color: branches
