@@ -2,9 +2,22 @@ import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 // file-preview's clone of Herdr's tabs (0.1.12): the same bar plus a Preview button that opens
 // file-preview in the side panel, the stack child "file-preview" of the main-fp layout.
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, keys } from "herdr";
 
 const PREVIEW = "file-preview";
+
+// A keys.json combo as Herdr's status bar writes it: "cmd-shift-e" is ⌘⇧E on macOS, Ctrl+Shift+E elsewhere.
+function shortcut(combo, mac) {
+  const mod = { cmd: mac ? "⌘" : "Ctrl+", ctrl: mac ? "⌃" : "Ctrl+", shift: mac ? "⇧" : "Shift+", alt: mac ? "⌥" : "Alt+", option: mac ? "⌥" : "Alt+" };
+  const parts = combo.endsWith("--") ? [...combo.slice(0, -2).split("-"), "-"] : combo.split("-");
+  return parts.map(p => mod[p.toLowerCase()] ?? p.toUpperCase()).join("");
+}
+
+/** The Preview button's hover: what it does, and the key bound to the same (the launcher's). */
+function previewTip(mac) {
+  const k = keys().find(b => b.section === "global" && b.action === `mod.open:${PREVIEW}-panel`);
+  return "Open or close the file preview" + (k ? ` (${shortcut(k.keys, mac)})` : "");
+}
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -83,10 +96,10 @@ export default class Tabs extends View {
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = shared("workspace.panels") ?? ["files", "changes"];
     this.syncPanel(space, panel, body, enabled);
-    const panelButton = (id, label, icon) => {
+    const panelButton = (id, label, icon, tip) => {
       const on = panel && !panel.hidden && body?.active === id;
       return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
-        .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
+        .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted).when(Boolean(tip), el => el.tooltip(tip))
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click(() => {
           if (on) run("layout.hide", { id: "panel" });
@@ -103,7 +116,7 @@ export default class Tabs extends View {
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
-      .when(Boolean(find(root, PREVIEW)), el => el.child(panelButton(PREVIEW, "Preview", "mods/file-preview/icons/file-md.svg")))
+      .when(Boolean(find(root, PREVIEW)), el => el.child(panelButton(PREVIEW, "Preview", "mods/file-preview/icons/file-md.svg", previewTip(w?.platform === "macos"))))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-fp/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-fp/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-fp/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

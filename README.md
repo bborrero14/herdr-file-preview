@@ -59,8 +59,8 @@ the window (a Preview button next to Files and Changes) or as a near-full-screen
     **← Files** (or Commits, Changes) bar to go back. `Esc` or `Tab` also goes back. The
     popup keeps the sidebar and the preview side by side.
   - The side panel's expand button turns it into the popup, on the same file. Closing that
-    popup (`Esc`, ✕, `cmd-e` or its anchor button) brings the side panel back.
-  - Opening the side panel (Preview, `cmd-shift-e`, the popup's anchor) moves the keyboard
+    popup (`Esc`, ✕, `cmd-shift-e` or its anchor button) brings the side panel back.
+  - Opening the side panel (Preview, `cmd-e`, the popup's anchor) moves the keyboard
     to it, so its keys work without a click.
 - **Remote spaces**: the tree, file reads and live reload all work on remote Unix
   machines. Diagrams are always rendered on the local machine.
@@ -216,7 +216,7 @@ As the herdr.dev guidance asks, here is what the mod does outside its own folder
    Herdr's `main` layout (0.1.12) with file-preview added to the right panel, and its tab
    bar is `tabs-fp`, a clone of Herdr's `tabs` with the Preview button. Herdr's own
    layouts and mods are read-only, so the clones are the only way to add the button.
-   They don't get Herdr's updates of `main` and `tabs`. Without `main-fp`, `cmd-shift-e`
+   They don't get Herdr's updates of `main` and `tabs`. Without `main-fp`, `cmd-e`
    opens the popup instead.
 
    ```sh
@@ -228,8 +228,8 @@ As the herdr.dev guidance asks, here is what the mod does outside its own folder
    ```json
    {
      "global": {
-       "cmd-e": "mod.open:file-preview",
-       "cmd-shift-e": "mod.open:file-preview-panel"
+       "cmd-e": "mod.open:file-preview-panel",
+       "cmd-shift-e": "mod.open:file-preview"
      }
    }
    ```
@@ -241,8 +241,8 @@ As the herdr.dev guidance asks, here is what the mod does outside its own folder
 
 | Key | Action |
 |---|---|
-| `cmd-e` | Open or close the popup |
-| `cmd-shift-e` | Open or close the side panel |
+| `cmd-e` | Open or close the side panel (the Preview button's hover shows this key) |
+| `cmd-shift-e` | Open or close the popup |
 
 Inside the mod:
 
