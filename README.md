@@ -6,7 +6,7 @@ and Mermaid diagrams, plus syntax-highlighted source files. It works in local an
 spaces, reloads live while agents edit files, and opens as a near-full-screen popup or
 as a panel docked to the right of the terminal.
 
-![file-preview showing a Markdown file with Mermaid diagrams](preview.png)
+![file-preview showing a Markdown file with a Mermaid diagram, a code fence and git marks](preview.png)
 
 ## Features
 
@@ -101,6 +101,9 @@ as a panel docked to the right of the terminal.
 - **Commit history** (GitLab-style graph). Inside a git repository the sidebar has two
   tabs, **Files | Commits**; the choice is remembered separately for the popup and the
   panel, and the tabs are hidden outside a repository.
+
+  ![The Commits tab: a GitLab-style graph with ref flags and a commit open in the preview](preview-commits.png)
+
   - The Commits tab lists `git log --topo-order` of every branch, tag and remote ref plus
     `HEAD` (stashes are left out), 300 commits at a time; the next page loads when you
     scroll or move near the end, or with the "Load more" row. The **All branches /
