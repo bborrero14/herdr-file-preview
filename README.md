@@ -34,7 +34,8 @@ the window (a Preview button next to Files and Changes) or as a near-full-screen
 - **Reading zoom** from 70 % to 200 %: one level scales the Markdown prose (headings,
   tables and inline code too), code fences, the code view and diagrams together; the bars
   and the tree keep their size. Use `+` / `-` / `0`, or **A−** / **A+** in the top bar
-  (click the percentage to reset). The popup and the side panel each remember their level.
+  (click the percentage to reset). The popup remembers its level; the side panel keeps one
+  per tab (a tab never zoomed shows 100 %), like its width.
 - **The popup and the side panel remember each folder.** Per root folder (and machine),
   they keep the open file and the expanded folders, and bring them back the next time they
   show that root, also after a Herdr restart: the folders reopen, the file shows again and the

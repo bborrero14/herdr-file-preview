@@ -39,7 +39,8 @@ const STRIP_W = 28, NARROW_TREE_W = 220;
 const TREE_KEY = "file-preview.tree.";   // + "popup" | "side" | "panel": the last explicit hide/show, persisted
 // Reading zoom of the document (prose, fences, code view, diagrams); never the bars or the tree.
 const LEVELS = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
-const ZOOM_KEY = "file-preview.zoom.";   // + "popup" | "side" | "panel": the level, persisted (null at 100 %)
+const ZOOM_KEY = "file-preview.zoom.";   // + "popup" | "panel": the level, persisted (null at 100 %)
+const TAB_ZOOM_KEY = "file-preview.zoom.side.tabs";   // the side panel's level per tab: { [tab id]: level }
 // Git decorations: status poll, the code view's line gutter and the long file's overview ruler.
 const POLL_GIT = 5000;
 // A full-height Editor lays out every row each frame: ~16 ms at 1000 rows, 45 ms at 2000.
@@ -81,6 +82,26 @@ function location() {
 }
 
 const ctxKey = (l) => JSON.stringify([l.cwd ?? null, l.on ?? null]);
+
+/** The shown tab's id (the active space's active tab), or null without a window. */
+function activeTab() {
+  return spaces().find((s) => s.active)?.tabs?.find((t) => t.active)?.id ?? null;
+}
+
+/** The side panel's reading zoom for a tab: its own level, else 100 %. */
+function tabZoom(tab) {
+  const z = (shared(TAB_ZOOM_KEY) ?? {})[tab];
+  return LEVELS.includes(z) ? z : 1;
+}
+
+/** Keeps a tab's level (100 % is the default, so it goes); closed tabs go with the write. */
+function keepTabZoom(tab, z) {
+  if (!tab) return;
+  const open = new Set(spaces().flatMap((s) => s.tabs?.map((t) => t.id) ?? []));
+  const all = Object.fromEntries(Object.entries(shared(TAB_ZOOM_KEY) ?? {}).filter(([k]) => open.has(k) && k !== tab));
+  if (z !== 1) all[tab] = z;
+  setShared(TAB_ZOOM_KEY, Object.keys(all).length ? all : null);
+}
 /** Folders above a root-relative path, outermost first ([] for null or a top-level entry). */
 const ancestors = (rel) => (rel ? rel.split("/").slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join("/")) : []);
 
@@ -179,7 +200,9 @@ export default class FilePreview extends View {
     this.loadedAt = null;   // when the shown content last changed
     this.dark = settings().dark;
     this.colW = null;       // measured width of the Markdown column (for diagram sizes)
-    const z = shared(ZOOM_KEY + this.mode);
+    // The side panel (one for the window) keeps a level per tab; the popup and a docked pane, one each.
+    this.zoomTab = this.mode === "side" ? activeTab() : null;
+    const z = this.mode === "side" ? tabZoom(this.zoomTab) : shared(ZOOM_KEY + this.mode);
     this.textZoom = LEVELS.includes(z) ? z : 1;
     this.codeFont = Math.round(FONT * this.textZoom);   // font size of every Editor
     this.width = null;      // measured width of the whole view
@@ -722,11 +745,27 @@ export default class FilePreview extends View {
     const i = LEVELS.indexOf(this.textZoom);
     const z = a === "reset" ? 1 : LEVELS[Math.max(0, Math.min(LEVELS.length - 1, i + (a === "in" ? 1 : -1)))];
     if (z === this.textZoom) return;
+    if (this.mode === "side") keepTabZoom(this.zoomTab, z);
+    else setShared(ZOOM_KEY + this.mode, z === 1 ? null : z);
+    this.setZoom(z);
+    cx.notify();
+  }
+
+  /** The reading zoom at level z (not from render: the Editors are made again at the new font). */
+  setZoom(z) {
     this.textZoom = z;
-    setShared(ZOOM_KEY + this.mode, z === 1 ? null : z);
     const font = Math.round(FONT * z);
     if (font !== this.codeFont) { this.codeFont = font; this.refont(); }
-    cx.notify();
+  }
+
+  /** Side panel, from render: another tab shows (here or in another space), so its own level. */
+  followZoom(cx) {
+    if (this.mode !== "side") return;
+    const tab = activeTab();
+    if (!tab || tab === this.zoomTab) return;
+    this.zoomTab = tab;
+    const z = tabZoom(tab);
+    if (z !== this.textZoom) cx.spawn(async (cx) => { if (this.zoomTab === tab && !this.closed) { this.setZoom(z); cx.notify(); } });
   }
 
   /** EditorStates take their font size only at creation: new ones in place, blocks and diagrams kept. */
@@ -1714,6 +1753,7 @@ export default class FilePreview extends View {
       return this.zoomLayer(t);
     }
     this.follow(cx);
+    this.followZoom(cx);
     if (settings().dark !== this.dark) {
       // Theme flipped: syntax colors are baked into the EditorStates, so rebuild them (outside render).
       this.dark = settings().dark;
