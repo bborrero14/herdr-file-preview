@@ -1,6 +1,12 @@
-# RECIPE — file-preview
+# File Preview
 
-Use this brief to rebuild the mod from an empty folder. Read
+Herdr's main layout with a file tree of the focused terminal's folder next to a rendered
+preview: Markdown with highlighted code fences and Mermaid diagrams, syntax-highlighted
+source, a GitLab-style commit graph and the uncommitted changes with their diffs. It
+reloads live while agents edit files, works in local and remote spaces, and opens as a
+side panel on the right of the window or as a near-full-screen popup.
+
+Use this brief to rebuild the mods and the `main-fp` layout from an empty folder. Read
 `~/.config/herdr-app/AGENTS.md`, `herdr.d.ts` and `gpui-kit.d.ts` first: the
 installed `.d.ts` files are the source of truth for the API. The notes below record
 what the docs leave out, all verified on a real build.
