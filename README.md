@@ -1,7 +1,7 @@
 # file-preview
 
-A [Herdr](https://herdr.dev) mod that shows a file tree of the focused terminal's folder
-next to a rendered preview of the selected file: Markdown with highlighted code fences
+A [Herdr](https://herdr.dev) layout (`main-fp`) and the mods behind it: a file tree of the
+focused terminal's folder next to a rendered preview of the selected file: Markdown with highlighted code fences
 and Mermaid diagrams, plus syntax-highlighted source files. It works in local and remote
 spaces, reloads live while agents edit files, and opens as a side panel on the right of
 the window (a Preview button next to Files and Changes) or as a near-full-screen popup.
@@ -376,7 +376,7 @@ scripts/sync.sh            install / update into ~/.config/herdr-app/mods/ and l
 scripts/make-big-md.sh     generates docs/fixtures/big.md (> 1 MB, not versioned)
 docs/fixtures/             test documents: every language, Mermaid, tables, binary
 keys.json                  shortcut snippet to merge
-RECIPE.md                  brief for rebuilding the mod from scratch
+RECIPE.md                  brief for rebuilding the mods and the layout from scratch
 LICENSE                    MIT
 ```
 
