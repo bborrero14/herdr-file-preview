@@ -6,7 +6,7 @@ and Mermaid diagrams, plus syntax-highlighted source files. It works in local an
 spaces, reloads live while agents edit files, and opens as a side panel on the right of
 the window (a Preview button next to Files and Changes) or as a near-full-screen popup.
 
-![file-preview in the side panel next to a terminal, showing a Markdown file with a Mermaid diagram, a code fence and a table](preview.png)
+![file-preview in the side panel next to a terminal, showing a Markdown file with a Mermaid diagram, a code fence and a table](preview-panel.png)
 
 ## Features
 
