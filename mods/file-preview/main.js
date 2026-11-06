@@ -295,6 +295,7 @@ export default class FilePreview extends View {
     this.ctx.memory = this.remembers ? { key: null, saved: null, sig: null, ready: false, timer: null, restore } : null;
     if (cwd) this.recallRoot(this.ctx);
     this.git = null;        // { files, folders } of the root's repo; null outside one
+    this.gitPending = true; // no status yet: keep the remembered tab instead of falling back to Files
     this.cursor = null;
     if (this.ts) this.closeTreeFind(null, false);
     this.show(null);
@@ -521,13 +522,15 @@ export default class FilePreview extends View {
       try { s = await git.status(root, ctx.on); }
       finally { ctx.gitBusy = false; }
       if (this.ctx !== ctx) return;
-      if (s !== undefined && !git.same(this.git, s)) {
+      const changed = s !== undefined && !git.same(this.git, s);
+      if (changed || this.gitPending) {
         const file = this.file, before = file ? this.git?.files.get(file) : undefined;
         const side = this.sideNow(), had = this.sideFocused();
-        this.git = s;
+        if (s !== undefined) this.git = s;
+        this.gitPending = false;   // the first answer settles the tabs, even "unreachable"
         // In or out of a repo: the Commits tab comes or goes, and the keyboard follows the sidebar.
         if (side !== this.sideNow() && had) this.sideFocus().focus();
-        if (file && s?.files.get(file) !== before) this.refreshMarks(cx);
+        if (changed && file && s?.files.get(file) !== before) this.refreshMarks(cx);
         cx.notify();
       }
       if (s !== undefined && this.commit?.change) this.refreshChange(cx);
@@ -1221,7 +1224,7 @@ export default class FilePreview extends View {
     } else if (k === "tab") { if (this.stacked()) this.toView(); else this.previewFocus.focus(); }
     else if (k === "r") this.reload(cx);
     else if (k === "b") this.toggleTree();
-    else if (k === "g" && this.git) this.setSide("commits", cx);
+    else if (k === "g" && this.gitTabs()) this.setSide("commits", cx);
     else return false;
     cx.notify();
     return true;
@@ -1365,14 +1368,19 @@ export default class FilePreview extends View {
 
   // ---- commits ---------------------------------------------------------------
 
-  /** "commits" or "changes" when chosen and the root is in a repo; else "files". */
-  sideNow() { return this.side !== "files" && this.git ? this.side : "files"; }
+  /** "commits" or "changes" when chosen and the root is in a repo (or not known yet); else "files". */
+  sideNow() { return this.side !== "files" && this.gitTabs() ? this.side : "files"; }
+  /**
+   * The Files | Commits | Changes tabs show: in a repo, or before the first status when a git tab
+   * was remembered, so a reload or a new context doesn't flash Files for the status's ~100 ms.
+   */
+  gitTabs() { return Boolean(this.git) || (this.gitPending && this.side !== "files"); }
   sideFocus() { const s = this.sideNow(); return s === "commits" ? this.commitsFocus : s === "changes" ? this.changesFocus : this.treeFocus; }
   sideFocused() { return this.treeFocus.is_focused() || this.commitsFocus.is_focused() || this.changesFocus.is_focused(); }
 
   /** A tab of the sidebar, remembered per mode. */
   setSide(side, cx) {
-    if (side !== "files" && !this.git) { this.note = "Not in a git repository"; return; }
+    if (side !== "files" && !this.gitTabs()) { this.note = "Not in a git repository"; return; }
     const had = this.sideFocused();
     this.side = side;
     setShared(SIDE_KEY + this.mode, side === "files" ? null : side);
@@ -2002,7 +2010,7 @@ export default class FilePreview extends View {
     const side = this.sideNow(), w = this.sideW ?? this.sideWidth(this.narrow());
     return v_flex().id("fp-side").size_full().min_h(0).border_r(1).border_color(t.border).bg(t.chrome).text_size(12.5)
       .on_size_change((size, cx) => { if (Math.round(size.width) !== this.sideW) { this.sideW = Math.round(size.width); cx.notify(); } })
-      .when(Boolean(this.git), (el) => el.child(h_flex().h(28).flex_none().px(6).gap(2).items_end().border_b(1).border_color(t.border)
+      .when(this.gitTabs(), (el) => el.child(h_flex().h(28).flex_none().px(6).gap(2).items_end().border_b(1).border_color(t.border)
         .child(this.sideTab("files", "Files", side, t)).child(this.sideTab("commits", "Commits", side, t))
         .child(this.sideTab("changes", "Changes", side, t))))
       .child(side === "commits" ? this.commitsPane(t, w, cx) : side === "changes" ? this.changesPane(t) : this.treePane(rows, t));

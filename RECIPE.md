@@ -463,7 +463,10 @@ with no keyboard or pointer automation.
 - **Tabs:** `Files | Commits | Changes` over the sidebar, only while the git status says the root is
   in a repo (`this.git` non-null). The choice lives in `shared("file-preview.sidebar.<mode>")`
   ("commits", "changes" or null); the effective tab is the stored one while `git`, else "files",
-  so a non-repo root shows Files without losing the preference. The commit list has its
+  so a non-repo root shows Files without losing the preference. Until the first status of a
+  context answers (`gitPending`), keep a stored git tab and its tabs bar ("Loading history…"):
+  Herdr reloads every copy on each save under `mods/` (a `sync.sh`, an update) and on a new
+  context `git` starts null, so falling back to Files flashes it for the status's ~100 ms. The commit list has its
   own focus handle; when the tab comes or goes with the repo, move the keyboard with it
   (in the git refresh handler, not in `render`). Wide view: the sidebar grows to
   `min(460, 40 %)` on the Commits tab; narrow view: the usual 220 px.
