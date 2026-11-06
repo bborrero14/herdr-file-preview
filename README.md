@@ -248,6 +248,30 @@ As the herdr.dev guidance asks, here is what the mod does outside its own folder
 4. Optional: run `herdr-app check` on `~/.config/herdr-app/mods/file-preview`,
    `file-preview-panel` and `tabs-fp`.
 
+## Updating
+
+Herdr doesn't update layouts or mods you installed from herdr.dev or GitHub: your copy
+stays as it was the day you added it. Each version is a git tag, listed with its changes
+in [`CHANGELOG.md`](CHANGELOG.md). To hear about new ones, watch the repo on GitHub
+(Watch → Custom → Releases).
+
+To update, replace the installed copies; don't add the repo again. An agent adding it
+again finds the names taken and installs a renamed second copy next to yours.
+
+- **From a clone of this repo:** `git pull`, then `scripts/sync.sh`. It replaces the
+  three mod folders and `layouts/main-fp.json` in place.
+- **With Herdr's agent:** ask it to *replace* the installed `file-preview`,
+  `file-preview-panel`, `tabs-fp` and `layouts/main-fp.json` with the ones from
+  `https://github.com/bborrero14/herdr-file-preview`, keeping the names.
+
+Your shortcuts, panel widths, zoom levels and remembered files survive an update: they
+live in `keys.json` and Herdr's state, not in the mod folders. If a version's notes list
+a `keys.json` change, merge it by hand.
+
+If you edited the installed files, the update overwrites them. Clone the mod under a new
+name first (`herdr-app do mod.clone '{"name":"file-preview","as":"my-file-preview"}'`) to
+keep your version.
+
 ## Shortcuts
 
 | Key | Action |
@@ -377,6 +401,7 @@ scripts/make-big-md.sh     generates docs/fixtures/big.md (> 1 MB, not versioned
 docs/fixtures/             test documents: every language, Mermaid, tables, binary
 keys.json                  shortcut snippet to merge
 RECIPE.md                  brief for rebuilding the mods and the layout from scratch
+CHANGELOG.md               changes in each tagged version
 LICENSE                    MIT
 ```
 
