@@ -3,7 +3,45 @@ import { exec } from "herdr";
 
 // Reads that write nothing under .git (no index refresh, lock or fsmonitor cookie): the folder
 // watch would see the write and start the next refresh. quotepath=off keeps UTF-8 names raw.
-export const GIT = 'g() { git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=off -c diff.autoRefreshIndex=false -C "$r" "$@"; }';
+//
+// A repository's own config can name programs. `filter.<name>.clean` and `.process` run `sh -c` on
+// every tracked file that `status` or `diff` re-hashes, and a copied folder's stale stat info makes
+// that every file, on every poll. Before its first git call, `g` lists the repo's filters (`git
+// config` runs nothing) and blanks each one through GIT_CONFIG_*, which git treats like -c, so the
+// clean, smudge and process commands are empty and `required` can't make that an error. Names are
+// newline-separated: git refuses a newline in a subsection name. A filter can't be named by
+// wildcard, so this covers in-tree .gitattributes and .git/info/attributes alike.
+// The listing follows [include] / [includeIf] (--includes: a file option like --local doesn't by
+// default) and also reads the worktree's own config.worktree (--worktree; without that extension
+// it reads .git/config again, which only repeats names). Either listing may fail on its own, so
+// neither can cut the other short. Filters set in your global or system config are yours, not
+// the folder's, and stay on (git-lfs keeps working).
+//
+// Submodules: `git status` runs another git inside each one, which inherits the -c options and
+// GIT_CONFIG_* (so fsmonitor & co. stay off there), but a submodule's own config can name its own
+// filters. So fpL walks the submodules too, breadth first (sh functions have no local variables,
+// so no recursion): `ls-files --stage` lists them (mode 160000; it reads the index and hashes
+// nothing), and `git config` inside each reads that submodule's config, absorbed
+// (.git/modules/…) or not. Up to 3 levels and 200 submodules; past that, `!cap` makes g() ignore
+// the inside of submodules (diff.ignoreSubmodules=dirty) instead of leaving any unchecked.
+// (Its variables are fp-prefixed: the scripts that use `g` keep short names like $n and $s.)
+const LIST_FILTERS = 'fpL() { fpQ=$r; fpD=0; fpC=0; '
+  + 'while [ -n "$fpQ" ]; do fpX=""; for fpW in $fpQ; do '
+  + 'git -C "$fpW" config --local --includes --name-only --get-regexp "^filter[.]"; '
+  + 'git -C "$fpW" config --worktree --includes --name-only --get-regexp "^filter[.]"; '
+  + '[ "$fpD" -lt 3 ] || continue; '
+  + 'for fpS in $(git -c core.fsmonitor=false -c core.quotepath=off -C "$fpW" ls-files --stage | grep "^160000 " | cut -f2-); do '
+  + 'case "$fpS" in \\"*) echo "!cap"; continue;; esac; '
+  + 'fpC=$((fpC+1)); if [ "$fpC" -gt 200 ]; then echo "!cap"; break; fi; '
+  + 'fpX="$fpX$fpW/$fpS\n"; done; done; fpQ=$fpX; fpD=$((fpD+1)); done; }';
+const FILTERS = LIST_FILTERS + '; fpF() { fpF=1; fpI=${GIT_CONFIG_COUNT:-0}; '
+  + 'fpN=$( IFS="\n"; set -f; fpL 2>/dev/null; true ); '
+  + 'case "$fpN" in *"!cap"*) export "GIT_CONFIG_KEY_$fpI=diff.ignoreSubmodules" "GIT_CONFIG_VALUE_$fpI=dirty"; fpI=$((fpI+1));; esac; '
+  + 'fpIFS=$IFS; IFS="\n"; set -f; for fpK in $fpN; do case "$fpK" in filter.*) ;; *) continue;; esac; fpK=${fpK#filter.}; fpK=${fpK%.*}; '
+  + 'for fpV in clean smudge process; do export "GIT_CONFIG_KEY_$fpI=filter.$fpK.$fpV" "GIT_CONFIG_VALUE_$fpI="; fpI=$((fpI+1)); done; '
+  + 'export "GIT_CONFIG_KEY_$fpI=filter.$fpK.required" "GIT_CONFIG_VALUE_$fpI=false"; fpI=$((fpI+1)); done; '
+  + 'set +f; IFS=$fpIFS; export GIT_CONFIG_COUNT=$fpI; }';
+export const GIT = FILTERS + '; g() { [ -n "$fpF" ] || fpF; git --no-optional-locks -c core.fsmonitor=false -c log.showSignature=false -c gpg.program=false -c core.quotepath=off -c diff.autoRefreshIndex=false -C "$r" "$@"; }';
 
 // $1 root (git -C, so a remote root works the same). Prints "<prefix of the root in its repo>\0" then the porcelain status.
 // Exit 4: no git; 5: not a work tree.
